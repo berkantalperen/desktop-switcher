@@ -109,6 +109,21 @@ cargo build --release
 The binary lands at `target/release/desktop-switcher` (`.exe` on Windows).
 Build on each platform natively; there is no cross-compilation step.
 
+To put it somewhere on `PATH`, so it works from any directory and from a
+keyboard shortcut:
+
+```powershell
+# Windows: this directory is already on PATH for the current user.
+Copy-Item target\release\desktop-switcher.exe "$env:LOCALAPPDATA\Microsoft\WindowsApps\"
+```
+
+```bash
+# Linux: ~/.local/bin is on PATH on most desktop installs.
+install -Dm755 target/release/desktop-switcher ~/.local/bin/desktop-switcher
+```
+
+Neither needs elevation, and uninstalling is deleting the file.
+
 ---
 
 ## Getting started
