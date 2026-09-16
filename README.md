@@ -20,7 +20,7 @@ human has confirmed.
 | A — Windows discovery and evidence | **done**, see [docs/hardware-inventory.md](docs/hardware-inventory.md) |
 | A — Ubuntu discovery | **done** — the panel is identified by the same serial from both computers |
 | B — hardware verification of input codes | **not started**; no VCP `0x60` write has ever been issued to these monitors |
-| C — Rust workspace, backends, CLI | **done**, 136 tests passing; both backends validated against real tool output |
+| C — Rust workspace, backends, CLI | **done** — builds, tests and runs natively on both computers; both backends validated against real tool output |
 | D — two-monitor switch transaction | **implemented**, exercised against the fake backend; unproven on hardware |
 | E — shortcuts and packaging | documented below, not yet installed |
 | F — keyboard/mouse switching | out of scope for v1 |

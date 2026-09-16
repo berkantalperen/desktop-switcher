@@ -195,12 +195,25 @@ panel advertises exactly one DP input. That is a strong inference, not
 evidence — it stays `reported` until a human watches the switch happen. See
 `docs/test-matrix.md`.
 
+### Toolchain on this host
+
+Rust 1.98.1 (user-scoped rustup, no elevation) and gcc 15.2.0. The workspace
+builds, passes `cargo fmt --check`, `cargo clippy -D warnings` and its full
+test suite natively here, and the release binary is installed at
+`~/.local/bin/desktop-switcher`.
+
+`doctor`, `monitors` and `inspect` were run against the real monitor from this
+host and produce the same identification, the same capability string and the
+same evidence labelling as the Windows side.
+
+Five tests are skipped on Linux relative to Windows; they are the Windows
+registry EDID tests, which are `cfg`-gated.
+
 ### Outstanding on this host
 
 | Item | Status |
 |---|---|
 | Input code that selects Ubuntu, per panel | `reported` — inferred, not yet proven by a switch |
-| The CLI built and run on Linux | not done — no Rust toolchain on the Z4 |
 | Behaviour of `setvcp` on this hardware | `unknown` — no write has been issued |
 
 ### The cabling question
