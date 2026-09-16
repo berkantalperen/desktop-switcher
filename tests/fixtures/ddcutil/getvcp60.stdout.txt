@@ -1,0 +1,1 @@
+VCP code 0x60 (Input Source                  ): HDMI-1 (sl=0x11)

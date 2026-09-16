@@ -148,15 +148,60 @@ Good news, and one blocker:
   reach them without `sudo`. The `ddcutil` package ships a udev rule and an
   `i2c` group that fix this properly; there is no `i2c` group on the host yet.
 
+### ddcutil — installed and working
+
+`ddcutil 2.2.5`. After `sudo apt install ddcutil` and adding the user to the
+`i2c` group, all six buses are readable and writable without `sudo`.
+
+`ddcutil detect` finds exactly one display:
+
+| | |
+|---|---|
+| Display number | 1 (a discovery-time address, not identity) |
+| I²C bus | `/dev/i2c-5` = `NVIDIA i2c adapter 9 at 21:00.0` |
+| DRM connector | `card1-DP-4` |
+| Mfg / Model | AOC / 27P2DG5 |
+| **Serial** | **`ASFPA9A001108`** (`read-confirmed`) |
+| DDC responsive | yes — `I2C address 0x37 (DDC) responsive: true` |
+| VCP version | 2.2 |
+| Controller | Mstar, firmware 0.1 |
+
+**The serial matches the one Windows reports for that panel.** This is the
+result Gate A actually needed: a monitor can be identified as the same physical
+device from both computers. The capability string is byte-identical across the
+two hosts as well.
+
+### Two findings that make the project viable
+
+1. **DDC works from the computer that is not being displayed.** The Z4 reads
+   `getvcp 60` as `HDMI-1 (0x11)` — the *Windows* input — while Windows is
+   actively driving that monitor over HDMI. The panel keeps answering DDC on an
+   input it is not currently showing, which is what allows either computer to
+   pull the monitor to itself.
+2. **The NVIDIA proprietary driver exposes its DDC lines.** `/dev/i2c-1`
+   through `/dev/i2c-5` are `NVIDIA i2c adapter N at 21:00.0`. This is the usual
+   reason ddcutil fails on this driver stack, and it is not a problem here.
+
+### Cabling, now settled for the connected panel
+
+| Panel | Windows | Ubuntu |
+|---|---|---|
+| `ASFPA9A001108` | HDMI-1 (`0x11`, `read-confirmed`) | DisplayPort via `card1-DP-4` |
+| `ASFPA9A001109` | DisplayPort-1 (`0x0F`, `read-confirmed`) | not cabled (confirmed by the user) |
+
+For panel `ASFPA9A001108`, the Ubuntu input is almost certainly
+**DisplayPort-1 (`0x0F`)**: the Z4 is cabled to it over DisplayPort, and the
+panel advertises exactly one DP input. That is a strong inference, not
+evidence — it stays `reported` until a human watches the switch happen. See
+`docs/test-matrix.md`.
+
 ### Outstanding on this host
 
 | Item | Status |
 |---|---|
-| `ddcutil` installed | blocked — needs `sudo apt install ddcutil` |
-| `/dev/i2c-*` usable without sudo | blocked — needs the `i2c` group and a re-login |
-| Which displays `ddcutil detect` finds | `unknown` |
-| Whether ddcutil reports the same serials Windows does | `unknown` |
-| Input code that selects Ubuntu, per panel | `unknown` |
+| Input code that selects Ubuntu, per panel | `reported` — inferred, not yet proven by a switch |
+| The CLI built and run on Linux | not done — no Rust toolchain on the Z4 |
+| Behaviour of `setvcp` on this hardware | `unknown` — no write has been issued |
 
 ### The cabling question
 

@@ -1,10 +1,9 @@
 //! Parsers for `ddcutil` output.
 //!
-//! **Status: written against ddcutil's documented output shapes, not yet
-//! validated against this hardware.** The fixtures in
-//! `tests/fixtures/ddcutil/` are synthetic until `scripts/ubuntu-preflight.sh`
-//! has run on the HP Z4 and its real output replaces them. Until then, treat
-//! every claim this module makes about the AOC panels as unverified.
+//! Validated against **ddcutil 2.2.5** on the HP Z4 (Ubuntu 26.04, NVIDIA
+//! Quadro M2000). The fixtures in `tests/fixtures/ddcutil/` are verbatim
+//! capture from that machine, with stdout, stderr and exit status recorded
+//! separately.
 //!
 //! Where ddcutil offers a `--terse` form, the terse form is parsed in
 //! preference: it is the machine-oriented output and changes far less often
@@ -20,6 +19,10 @@ pub enum ParseError {
     BadVcpValue(String),
     #[error("`getvcp 60` output did not mention feature 0x60: {0:?}")]
     NotInputSource(String),
+    /// ddcutil answered, and the monitor reported the feature as in error.
+    /// Distinct from a parse failure: the tool worked, the feature did not.
+    #[error("the monitor reported feature 0x{0:02X} as unsupported")]
+    FeatureError(u8),
     #[error("could not parse capabilities output: {0}")]
     Capabilities(String),
 }
@@ -105,7 +108,9 @@ pub fn parse_detect(stdout: &str) -> Result<Vec<DetectedDisplay>, ParseError> {
         }
         match key.trim() {
             "I2C bus" => display.i2c_bus = Some(value.to_string()),
-            "DRM connector" => display.drm_connector = Some(value.to_string()),
+            // 2.2.5 prints `DRM_connector`; older releases and the docs use a
+            // space. Accept both rather than depending on which is installed.
+            "DRM connector" | "DRM_connector" => display.drm_connector = Some(value.to_string()),
             // `AOC - (Unknown)` or just `AOC`: keep only the PNP id.
             "Mfg id" => {
                 let id = value.split_whitespace().next().unwrap_or(value);
@@ -140,6 +145,12 @@ pub fn parse_getvcp_input(stdout: &str) -> Result<InputCode, ParseError> {
 
         // Terse form.
         if let Some(rest) = trimmed.strip_prefix("VCP 60 ") {
+            // `VCP 60 ERR` means the monitor rejected the feature. ddcutil
+            // exits non-zero, but the distinction still has to survive, or an
+            // unsupported feature reads as a mangled value.
+            if rest.trim() == "ERR" {
+                return Err(ParseError::FeatureError(0x60));
+            }
             if let Some(token) = rest.split_whitespace().last() {
                 if let Some(hex) = token.strip_prefix('x') {
                     return hex_to_code(hex, trimmed);
@@ -236,36 +247,112 @@ pub fn parse_capabilities(stdout: &str) -> Result<ParsedCapabilities, ParseError
     Ok(parsed)
 }
 
+/// Pull the raw MCCS capability string out of `capabilities --terse`.
+///
+/// ddcutil 2.2.5 prefixes it with `Unparsed capabilities string: `, so the
+/// line cannot simply be trimmed and handed to the MCCS parser. Anything that
+/// is not a `(...)` blob is rejected rather than passed along.
+pub fn extract_terse_capability_string(stdout: &str) -> Option<&str> {
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        let candidate = match trimmed.strip_prefix("Unparsed capabilities string:") {
+            Some(rest) => rest.trim(),
+            None if trimmed.starts_with('(') => trimmed,
+            None => continue,
+        };
+        if candidate.starts_with('(') && candidate.ends_with(')') {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // SYNTHETIC fixtures, shaped from ddcutil's documented output. Replace
-    // with real capture from the HP Z4 before trusting anything here.
-    const DETECT: &str = include_str!("../../../tests/fixtures/ddcutil/detect.synthetic.txt");
-    const CAPS: &str = include_str!("../../../tests/fixtures/ddcutil/capabilities.synthetic.txt");
+    // Verbatim capture from ddcutil 2.2.5 on the HP Z4, 2026-09-16.
+    const DETECT: &str = include_str!("../../../tests/fixtures/ddcutil/detect.stdout.txt");
+    const CAPS: &str = include_str!("../../../tests/fixtures/ddcutil/capabilities.stdout.txt");
+    const CAPS_TERSE: &str =
+        include_str!("../../../tests/fixtures/ddcutil/capabilities-terse.stdout.txt");
+    const GETVCP: &str = include_str!("../../../tests/fixtures/ddcutil/getvcp60.stdout.txt");
+    const GETVCP_TERSE: &str =
+        include_str!("../../../tests/fixtures/ddcutil/getvcp60-terse.stdout.txt");
+    const ERR_UNSUPPORTED: &str =
+        include_str!("../../../tests/fixtures/ddcutil/error-unsupported-feature.stdout.txt");
 
     #[test]
-    fn parses_two_panels_with_distinct_serials() {
+    fn parses_the_real_detect_output() {
         let displays = parse_detect(DETECT).unwrap();
-        let valid: Vec<&DetectedDisplay> = displays.iter().filter(|d| !d.invalid).collect();
-        assert_eq!(valid.len(), 2);
-        assert_eq!(valid[0].serial.as_deref(), Some("ASFPA9A001108"));
-        assert_eq!(valid[1].serial.as_deref(), Some("ASFPA9A001109"));
-        assert_eq!(valid[0].manufacturer.as_deref(), Some("AOC"));
-        assert_eq!(valid[0].model.as_deref(), Some("27P2Q"));
+        assert_eq!(displays.len(), 1, "only one panel is cabled to the Z4");
+        let d = &displays[0];
+        assert!(!d.invalid);
+        assert_eq!(d.display_number, Some(1));
+        assert_eq!(d.i2c_bus.as_deref(), Some("/dev/i2c-5"));
+        assert_eq!(d.drm_connector.as_deref(), Some("card1-DP-4"));
+        assert_eq!(d.model.as_deref(), Some("27P2DG5"));
+        assert_eq!(d.manufacturer.as_deref(), Some("AOC"));
+    }
+
+    /// The whole cross-host design rests on this: the serial ddcutil reports
+    /// must be the one Windows reports, or a monitor cannot be matched
+    /// between the two computers.
+    #[test]
+    fn the_serial_matches_the_one_windows_reports() {
+        let displays = parse_detect(DETECT).unwrap();
+        assert_eq!(displays[0].serial.as_deref(), Some("ASFPA9A001108"));
+    }
+
+    #[test]
+    fn handles_the_2_2_5_underscore_spelling_of_drm_connector() {
+        // 2.2.5 prints `DRM_connector`; the docs use a space. Both must work,
+        // because which one appears depends on the installed release.
+        assert!(DETECT.contains("DRM_connector:"));
+        let spaced = DETECT.replace("DRM_connector:", "DRM connector:");
+        assert_eq!(
+            parse_detect(&spaced).unwrap()[0].drm_connector.as_deref(),
+            Some("card1-DP-4")
+        );
     }
 
     #[test]
     fn prefers_the_drm_connector_as_the_stable_id() {
         let displays = parse_detect(DETECT).unwrap();
-        assert_eq!(displays[0].stable_id(), "card1-DP-1");
+        assert_eq!(displays[0].stable_id(), "card1-DP-4");
     }
 
     #[test]
-    fn an_invalid_display_is_flagged_not_silently_dropped() {
-        let displays = parse_detect(DETECT).unwrap();
-        assert!(displays.iter().any(|d| d.invalid));
+    fn falls_back_through_bus_then_number_when_no_connector_is_reported() {
+        let no_connector = DETECT.replace("DRM_connector:           card1-DP-4", "");
+        assert_eq!(
+            parse_detect(&no_connector).unwrap()[0].stable_id(),
+            "/dev/i2c-5"
+        );
+
+        let bare = "Display 4\n   VCP version:  2.2\n";
+        assert_eq!(parse_detect(bare).unwrap()[0].stable_id(), "display-4");
+    }
+
+    /// Constructed, not captured: only one panel is currently cabled to the
+    /// Z4, so a second block cannot be observed on this hardware yet.
+    #[test]
+    fn separates_multiple_displays_and_flags_invalid_ones() {
+        let two = format!(
+            "{}\n{}\nInvalid display\n   I2C bus:  /dev/i2c-3\n   Monitor does not support DDC\n",
+            DETECT.trim_end(),
+            DETECT
+                .trim_end()
+                .replace("Display 1", "Display 2")
+                .replace("/dev/i2c-5", "/dev/i2c-6")
+                .replace("card1-DP-4", "card1-DP-1")
+                .replace("ASFPA9A001108", "ASFPA9A001109")
+        );
+        let displays = parse_detect(&two).unwrap();
+        assert_eq!(displays.len(), 3);
+        assert_eq!(displays[0].serial.as_deref(), Some("ASFPA9A001108"));
+        assert_eq!(displays[1].serial.as_deref(), Some("ASFPA9A001109"));
+        assert!(displays[2].invalid, "a non-DDC display must be flagged");
     }
 
     #[test]
@@ -277,21 +364,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_terse_getvcp_form() {
+    fn parses_the_real_terse_getvcp() {
+        assert_eq!(parse_getvcp_input(GETVCP_TERSE).unwrap(), InputCode(0x11));
+    }
+
+    #[test]
+    fn parses_the_real_verbose_getvcp() {
+        assert_eq!(parse_getvcp_input(GETVCP).unwrap(), InputCode(0x11));
+    }
+
+    /// The Z4 reads 0x11 — the *Windows* input — while Windows is driving
+    /// that monitor over HDMI. DDC stays reachable from the computer that is
+    /// not currently displayed, which is what makes switching work at all.
+    #[test]
+    fn both_getvcp_forms_agree_with_each_other() {
         assert_eq!(
-            parse_getvcp_input("VCP 60 SNC x0f\n").unwrap(),
-            InputCode(0x0F)
-        );
-        assert_eq!(
-            parse_getvcp_input("VCP 60 SNC x11\n").unwrap(),
-            InputCode(0x11)
+            parse_getvcp_input(GETVCP).unwrap(),
+            parse_getvcp_input(GETVCP_TERSE).unwrap()
         );
     }
 
     #[test]
-    fn parses_the_verbose_getvcp_form() {
-        let text = "VCP code 0x60 (Input Source                  ): DisplayPort-1 (sl=0x0f)\n";
-        assert_eq!(parse_getvcp_input(text).unwrap(), InputCode(0x0F));
+    fn a_feature_error_is_distinct_from_a_parse_failure() {
+        // `VCP AA ERR`: ddcutil worked, the monitor rejected the feature.
+        assert!(matches!(
+            parse_getvcp_input(&ERR_UNSUPPORTED.replace("AA", "60")).unwrap_err(),
+            ParseError::FeatureError(0x60)
+        ));
     }
 
     #[test]
@@ -310,33 +409,65 @@ mod tests {
     }
 
     #[test]
-    fn parses_capabilities_values() {
+    fn parses_the_real_capabilities_output() {
         let caps = parse_capabilities(CAPS).unwrap();
         assert!(caps.feature_present);
         let codes: Vec<u8> = caps.options.iter().map(|(c, _)| c.get()).collect();
-        assert_eq!(codes, vec![0x01, 0x03, 0x0F, 0x11]);
+        // Note the order the monitor actually reports: not sorted.
+        assert_eq!(codes, vec![0x01, 0x03, 0x11, 0x0F]);
         assert_eq!(caps.model.as_deref(), Some("27P2Q"));
         assert_eq!(caps.mccs_version.as_deref(), Some("2.2"));
     }
 
     #[test]
     fn values_of_other_features_are_not_read_as_input_sources() {
-        let text = "\
-VCP Features:
-   Feature: 14 (Select color preset)
-      Values:
-         01: sRGB
-         05: 6500K
-   Feature: 60 (Input Source)
-      Values:
-         0f: DisplayPort-1
-   Feature: 86 (Display Scaling)
-      Values:
-         02: Scale to fit
-";
-        let caps = parse_capabilities(text).unwrap();
-        let codes: Vec<u8> = caps.options.iter().map(|(c, _)| c.get()).collect();
-        assert_eq!(codes, vec![0x0F]);
+        // The real output carries value lists on 0x14, 0x86, 0xCC, 0xDC and
+        // 0xD6, several of which contain bytes that are also valid input
+        // codes. Only the four under feature 0x60 may come back.
+        let caps = parse_capabilities(CAPS).unwrap();
+        assert_eq!(caps.options.len(), 4);
+        assert!(caps.options.iter().all(|(_, label)| !label.is_empty()));
+    }
+
+    #[test]
+    fn extracts_the_raw_capability_string_despite_the_2_2_5_prefix() {
+        let raw = extract_terse_capability_string(CAPS_TERSE).unwrap();
+        assert!(raw.starts_with("(vcp("), "{raw}");
+        assert!(raw.ends_with(')'));
+        assert!(!raw.contains("Unparsed"));
+    }
+
+    /// Two independent readings of the same claim, from two different ddcutil
+    /// output modes. A disagreement means one of the parsers is wrong.
+    #[test]
+    fn the_human_readable_and_raw_capability_readings_agree() {
+        let raw = extract_terse_capability_string(CAPS_TERSE).unwrap();
+        let from_raw = switcher_core::mccs::input_source_values(raw)
+            .unwrap()
+            .unwrap();
+        let from_table: Vec<u8> = parse_capabilities(CAPS)
+            .unwrap()
+            .options
+            .iter()
+            .map(|(c, _)| c.get())
+            .collect();
+        assert_eq!(from_raw, from_table);
+    }
+
+    /// And the same panel, read from Windows through an entirely different
+    /// tool, reports a byte-identical capability string.
+    #[test]
+    fn the_capability_string_matches_the_one_powertoys_reports() {
+        let from_linux = extract_terse_capability_string(CAPS_TERSE).unwrap();
+        let from_windows = "(vcp(02 04 05 08 10 12 14(01 05 06 08 0B) 16 18 1A 52 60(01 03 11 0F ) 62 86(02 05) C8 C9 CC(01 02 03 04 05 06 07 09 0A 0B 0C 0D 0E 12 14 16 1E) B6 DF C6 DC(00 0B 0C 0D 0E 0F 10) D6(01 04) ED F8)prot(monitor)type(LCD)cmds(01 02 03 07 0C F3)mccs_ver(2.2)asset_eep(64)mpu_ver(005)model(27P2Q)mswhql(1))";
+        assert_eq!(from_linux, from_windows);
+    }
+
+    #[test]
+    fn rejects_terse_output_that_is_not_a_capability_string() {
+        assert!(extract_terse_capability_string("Display not found\n").is_none());
+        assert!(extract_terse_capability_string("Unparsed capabilities string: broken").is_none());
+        assert!(extract_terse_capability_string("").is_none());
     }
 
     #[test]

@@ -1,9 +1,9 @@
 //! Ubuntu backend: a process adapter over the `ddcutil` CLI.
 //!
-//! **Status: not yet validated against the HP Z4.** The command shapes follow
-//! ddcutil's documentation, and the parsers are tested against synthetic
-//! fixtures. Run `scripts/ubuntu-preflight.sh` on the real host and replace
-//! `tests/fixtures/ddcutil/` before relying on any of it.
+//! Validated against **ddcutil 2.2.5** on the HP Z4: discovery, identity,
+//! capabilities and reads all confirmed against the real monitor. No write has
+//! been performed on this hardware, so `set_input` remains the one path here
+//! that has never run for real.
 //!
 //! Two decisions worth stating:
 //!
@@ -31,8 +31,9 @@ use switcher_core::types::{
 pub const EXE_NAME: &str = "ddcutil";
 
 const PERMISSION_HINT: &str =
-    "Add yourself to the `i2c` group (`sudo usermod -aG i2c $USER`, then \
-     log out and back in), and make sure the `i2c-dev` module is loaded. See \
+    "Add yourself to the `i2c` group (`sudo usermod -aG i2c $USER`, then log \
+     out and back in). If /dev/i2c-* does not exist at all, i2c-dev is missing \
+     -- though on many kernels it is built in and needs no modprobe. See \
      https://www.ddcutil.com/i2c_permissions/ . Do not run this tool with sudo.";
 
 pub struct DdcutilBackend {
@@ -371,8 +372,7 @@ impl MonitorBackend for DdcutilBackend {
         let raw_capabilities = self
             .run_ok(&terse_args)
             .ok()
-            .map(|r| r.stdout.trim().to_string())
-            .filter(|s| s.starts_with('('));
+            .and_then(|r| parse::extract_terse_capability_string(&r.stdout).map(str::to_string));
 
         let mut options: Vec<InputSourceOption> = parsed
             .options
@@ -412,6 +412,15 @@ impl MonitorBackend for DdcutilBackend {
 
         let run = self.run(&args)?;
         if !run.success() {
+            // ddcutil also exits non-zero when the monitor rejects the
+            // feature, printing `VCP 60 ERR` on stdout. That is the monitor
+            // answering, not the tool failing, so check it before classifying.
+            if matches!(
+                parse::parse_getvcp_input(&run.stdout),
+                Err(parse::ParseError::FeatureError(_))
+            ) {
+                return Ok(InputReading::Unsupported);
+            }
             return match classify_failure(&run) {
                 e @ BackendError::MonitorNotFound { .. } => Err(e),
                 BackendError::Unsupported { .. } => Ok(InputReading::Unsupported),

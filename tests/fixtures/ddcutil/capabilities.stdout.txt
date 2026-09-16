@@ -1,0 +1,77 @@
+Model: 27P2Q
+MCCS version: 2.2
+Commands:
+   Op Code: 01 (VCP Request)
+   Op Code: 02 (VCP Response)
+   Op Code: 03 (VCP Set)
+   Op Code: 07 (Timing Request)
+   Op Code: 0C (Save Settings)
+   Op Code: F3 (Capabilities Request)
+VCP Features:
+   Feature: 02 (New control value)
+   Feature: 04 (Restore factory defaults)
+   Feature: 05 (Restore factory brightness/contrast defaults)
+   Feature: 08 (Restore color defaults)
+   Feature: 10 (Brightness)
+   Feature: 12 (Contrast)
+   Feature: 14 (Select color preset)
+      Values:
+         01: sRGB
+         05: 6500 K
+         06: 7500 K
+         08: 9300 K
+         0b: User 1
+   Feature: 16 (Video gain: Red)
+   Feature: 18 (Video gain: Green)
+   Feature: 1A (Video gain: Blue)
+   Feature: 52 (Active control)
+   Feature: 60 (Input Source)
+      Values:
+         01: VGA-1
+         03: DVI-1
+         11: HDMI-1
+         0f: DisplayPort-1
+   Feature: 62 (Audio speaker volume)
+   Feature: 86 (Display Scaling)
+      Values:
+         02: Max image, no aspect ration distortion
+         05: Max vertical image with aspect ratio distortion
+   Feature: C8 (Display controller type)
+   Feature: C9 (Display firmware level)
+   Feature: CC (OSD Language)
+      Values:
+         01: Chinese (traditional, Hantai)
+         02: English
+         03: French
+         04: German
+         05: Italian
+         06: Japanese
+         07: Korean
+         09: Russian
+         0a: Spanish
+         0b: Swedish
+         0c: Turkish
+         0d: Chinese (simplified / Kantai)
+         0e: Portuguese (Brazil)
+         12: Czech
+         14: Dutch
+         16: Finnish
+         1e: Polish
+   Feature: B6 (Display technology type)
+   Feature: DF (VCP Version)
+   Feature: C6 (Application enable key)
+   Feature: DC (Display Mode)
+      Values:
+         00: Standard/Default mode
+         0b: Unrecognized value
+         0c: Unrecognized value
+         0d: Unrecognized value
+         0e: Unrecognized value
+         0f: Unrecognized value
+         10: Unrecognized value
+   Feature: D6 (Power mode)
+      Values:
+         01: DPM: On,  DPMS: Off
+         04: DPM: Off, DPMS: Off
+   Feature: ED (Manufacturer specific feature)
+   Feature: F8 (Manufacturer specific feature)
