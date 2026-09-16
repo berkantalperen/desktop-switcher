@@ -672,48 +672,69 @@ pub fn configure(app: &mut App) -> Result<i32> {
             destinations: Default::default(),
         };
 
-        // The code for THIS computer can be established without writing
-        // anything: read it, and have the user confirm the monitor really is
-        // showing this computer right now.
+        // One mapping can always be established without writing anything:
+        // read the current input, and have the user say which computer that
+        // input is actually showing. It does not have to be this one --
+        // being told "that is the other computer" is just as good, and is the
+        // normal case when configuring from the machine that is idle.
         match app.backend.read_input(&monitor.handle()) {
             Ok(InputReading::Value(code)) => {
                 println!(
                     "\n  This display currently reports input {}.",
                     InputReading::Value(code)
                 );
-                if ui::confirm(&format!(
-                    "  Is `{logical_id}` showing THIS computer ({self_destination}) right now?"
-                ))? {
-                    monitor_config.destinations.insert(
-                        self_destination.clone(),
-                        DestinationMapping {
-                            input_code: code,
-                            verification: Evidence::UserConfirmed,
-                            verified_on: Some(eventlog::today()),
-                            note: Some(
-                                "Read from the monitor while the user confirmed it was displaying this computer."
-                                    .into(),
-                            ),
-                        },
-                    );
-                    println!("  Recorded: {self_destination} -> {code} (user-confirmed)");
-                } else {
-                    println!("  Skipped. Record it later once this computer is displayed.");
+                let choice = ui::choose(
+                    "  Which computer is it actually showing right now?",
+                    &[
+                        format!("{self_destination} (this computer)"),
+                        format!("{other_destination} (the other computer)"),
+                        "Something else, or I cannot tell".to_string(),
+                    ],
+                )?;
+                match choice {
+                    0 | 1 => {
+                        let destination = if choice == 0 {
+                            self_destination.clone()
+                        } else {
+                            other_destination.clone()
+                        };
+                        monitor_config.destinations.insert(
+                            destination.clone(),
+                            DestinationMapping {
+                                input_code: code,
+                                verification: Evidence::UserConfirmed,
+                                verified_on: Some(eventlog::today()),
+                                note: Some(
+                                    "Read from the monitor while the user confirmed which computer it was displaying."
+                                        .into(),
+                                ),
+                            },
+                        );
+                        println!(
+                            "  Recorded: {destination} -> {code} (user-confirmed, no write needed)"
+                        );
+                    }
+                    _ => println!("  Nothing recorded for this display yet."),
                 }
             }
             Ok(other) => println!("\n  Could not read the current input: {other}"),
             Err(e) => println!("\n  Could not read the current input: {e}"),
         }
 
-        // The other computer's code cannot be known without a real switch.
-        println!(
-            "\n  The input code for `{other_destination}` can only be established by switching"
-        );
-        println!("  this monitor and watching what happens. That is a separate, deliberate");
-        println!("  step:");
-        println!(
-            "    desktop-switcher test-input --monitor {logical_id} --code 0xNN --destination {other_destination}"
-        );
+        // Whatever is still missing can only come from a real switch.
+        let missing: Vec<String> = [&self_destination, &other_destination]
+            .into_iter()
+            .filter(|d| !monitor_config.destinations.contains_key(*d))
+            .cloned()
+            .collect();
+        for destination in &missing {
+            println!("\n  The input code for `{destination}` can only be established by switching");
+            println!("  this monitor and watching what happens. That is a separate, deliberate");
+            println!("  step:");
+            println!(
+                "    desktop-switcher test-input --monitor {logical_id} --code 0xNN --destination {destination}"
+            );
+        }
         if let Ok(caps) = app.backend.input_capabilities(&monitor.handle()) {
             if !caps.options.is_empty() {
                 let rendered: Vec<String> = caps.options.iter().map(|o| o.to_string()).collect();
@@ -737,10 +758,9 @@ pub fn configure(app: &mut App) -> Result<i32> {
     app.config = Some(config);
 
     println!("\nSaved to {}", app.config_path.display());
-    println!("\nNext: run `desktop-switcher doctor` to see what is still missing,");
-    println!("then use `test-input` for each monitor to establish the codes for");
-    println!("`{other_destination}`. `switch` refuses to run until every mapping is");
-    println!("user-confirmed.");
+    println!("\nNext: run `desktop-switcher doctor`, which lists exactly which");
+    println!("mappings are still missing, then use `test-input` to establish each");
+    println!("one. `switch` refuses to run until every mapping is user-confirmed.");
     Ok(0)
 }
 
