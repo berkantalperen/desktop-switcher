@@ -96,23 +96,95 @@ tests rather than silently misreading a monitor id.
 
 ---
 
-## Ubuntu host (HP Z4) — NOT YET CAPTURED
+## Ubuntu host (HP Z4) — partially captured 2026-09-16
 
-**Status: outstanding.** Everything below is unknown.
+**Status: system inspected, DDC not yet reachable.** Captured over SSH with the
+read-only preflight script plus direct sysfs reads. No write of any kind was
+made to this host.
+
+| | |
+|---|---|
+| Hostname | `berkant-HP-Z4-G4` |
+| OS | Ubuntu 26.04.1 LTS (Resolute Raccoon) |
+| Kernel | 7.0.0-31-generic |
+| GPU | NVIDIA Quadro M2000 (GM206GL), `21:00.0` |
+| GPU driver | proprietary `nvidia` 580.178.04 |
+| User | `berkant`, in the `sudo` group |
+| `ddcutil` | **not installed** (`read-confirmed`) |
+
+### Graphics outputs
+
+The Quadro M2000 presents four DisplayPort connectors and **no HDMI**:
+
+| Connector | Status |
+|---|---|
+| `card1-DP-1` | disconnected |
+| `card1-DP-2` | disconnected |
+| `card1-DP-3` | disconnected |
+| `card1-DP-4` | **connected** |
+
+**Only one display is linked to the Z4.** See "The cabling question" below;
+this is the most consequential open item in the project.
+
+EDID is not exposed through sysfs — every connector reports `edid=0B`, which is
+normal for the proprietary NVIDIA driver. Identity on this host therefore has to
+come from `ddcutil detect`, not from sysfs as it does on Windows.
+
+### I²C / DDC readiness
+
+Good news, and one blocker:
+
+- `i2c-dev` is **built into this kernel**, not a module. No `modprobe` is
+  needed, and the preflight script's advice to load it does not apply here.
+- The GPU's DDC lines **are** exposed to userspace, which is the thing that most
+  often stops ddcutil working with the proprietary NVIDIA driver:
+
+  | Device | Adapter |
+  |---|---|
+  | `/dev/i2c-0` | SMBus I801 adapter at `0000:00:1f.4` (chipset, not a display) |
+  | `/dev/i2c-1` … `/dev/i2c-5` | `NVIDIA i2c adapter N at 21:00.0` |
+
+- **Permissions block access.** All are `crw------- root root`, so nothing can
+  reach them without `sudo`. The `ddcutil` package ships a udev rule and an
+  `i2c` group that fix this properly; there is no `i2c` group on the host yet.
+
+### Outstanding on this host
 
 | Item | Status |
 |---|---|
-| `ddcutil` installed and version | `unknown` |
-| `i2c-dev` loaded, `/dev/i2c-*` permissions without sudo | `unknown` |
+| `ddcutil` installed | blocked — needs `sudo apt install ddcutil` |
+| `/dev/i2c-*` usable without sudo | blocked — needs the `i2c` group and a re-login |
 | Which displays `ddcutil detect` finds | `unknown` |
-| Whether ddcutil reports the same serials as Windows does | `unknown` |
-| Which monitor-side port the Ubuntu cable occupies on each panel | `unknown` |
+| Whether ddcutil reports the same serials Windows does | `unknown` |
 | Input code that selects Ubuntu, per panel | `unknown` |
 
-To capture it, run `scripts/ubuntu-preflight.sh` on the Z4. It is read-only: it
-never runs `setvcp` and never changes system configuration. Its output replaces
-the synthetic fixtures in `tests/fixtures/ddcutil/`, which currently exist only
-so the parser has something to test against.
+### The cabling question
+
+Windows sees panel `...108` on **HDMI-1** and panel `...109` on
+**DisplayPort-1**. The Z4 can only drive DisplayPort. Each AOC has a single DP
+input. So panel `...109`, whose DP input is already occupied by Windows, cannot
+also be cabled to the Z4.
+
+That is consistent with exactly one Z4 connector being live, and the likely
+physical reality is:
+
+| Panel | Windows | Ubuntu |
+|---|---|---|
+| `ASFPA9A001108` | HDMI | DisplayPort (`card1-DP-4`) |
+| `ASFPA9A001109` | DisplayPort | **not connected** |
+
+One detail supports this rather than a merely-sleeping link: panel `...108` is
+currently displaying Windows over HDMI, yet the Z4 still sees its DP input as
+connected. So these panels keep hot-plug detect asserted on an input that is not
+selected — meaning a second cabled panel would also have shown as connected.
+
+**If this is right, only one of the two monitors can currently be switched
+between the computers**, and the project's two-monitor goal needs a second cable
+into panel `...109` — which would mean a DisplayPort→HDMI or →DVI conversion,
+since that panel's DP is taken and the M2000 has no HDMI output.
+
+This needs physical confirmation by counting cables at the back of the monitors;
+it is not something either computer can settle on its own.
 
 ---
 

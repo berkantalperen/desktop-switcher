@@ -43,29 +43,51 @@ capture() {
     printf 'desktop     : %s\n' "${XDG_CURRENT_DESKTOP:-unset}"
 
     section "ddcutil availability"
+    # A missing ddcutil is not a reason to stop: the kernel, permission and
+    # connector evidence below is exactly what explains *why* it will or will
+    # not work once installed, and it is the same evidence either way.
+    HAVE_DDCUTIL=0
     if command -v ddcutil >/dev/null 2>&1; then
+        HAVE_DDCUTIL=1
         printf 'ddcutil path: %s\n' "$(command -v ddcutil)"
         capture ddcutil --version
     else
         printf 'ddcutil is NOT installed.\n'
         printf 'To install:  sudo apt install ddcutil\n'
-        printf 'Stopping here: everything below needs ddcutil.\n'
-        exit 0
+        printf 'Continuing with the checks that do not need it.\n'
     fi
 
+    section "graphics hardware"
+    capture lspci -nn -k -d ::0300
+
     section "i2c kernel support and permissions"
-    capture lsmod
-    printf '\n--- i2c-dev loaded? ---\n'
+    # i2c-dev may be a module OR built into the kernel. Testing lsmod alone
+    # reports a false alarm on a kernel that has it builtin, which is the case
+    # on the HP Z4 this was written for. Test what actually matters: whether
+    # the device nodes exist.
+    printf -- '--- is i2c-dev available? ---\n'
     if lsmod 2>/dev/null | grep -q '^i2c_dev'; then
-        printf 'i2c_dev: loaded\n'
+        printf 'i2c_dev: loaded as a module\n'
+    elif modinfo i2c-dev 2>/dev/null | grep -qi 'builtin'; then
+        printf 'i2c_dev: built into the kernel, nothing to load\n'
+    elif ls /dev/i2c-* >/dev/null 2>&1; then
+        printf 'i2c_dev: not listed by lsmod, but /dev/i2c-* exists, so it is present\n'
     else
-        printf 'i2c_dev: NOT loaded\n'
+        printf 'i2c_dev: NOT available, and no /dev/i2c-* device nodes exist\n'
         printf 'To load now:        sudo modprobe i2c-dev\n'
         printf 'To load at boot:    echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf\n'
     fi
 
     printf '\n--- /dev/i2c-* devices ---\n'
     ls -l /dev/i2c-* 2>&1
+
+    # Which buses are graphics DDC lines rather than chipset SMBus. Only the
+    # former can reach a monitor, and on some driver stacks none are exposed.
+    printf '\n--- i2c adapter names ---\n'
+    for bus in /sys/bus/i2c/devices/i2c-*; do
+        [ -e "$bus/name" ] || continue
+        printf '%-10s %s\n' "$(basename "$bus")" "$(cat "$bus/name" 2>/dev/null)"
+    done
 
     printf '\n--- i2c group membership ---\n'
     if getent group i2c >/dev/null 2>&1; then
@@ -92,10 +114,38 @@ capture() {
     done
 
     section "drm connectors (which physical port each display uses)"
+    printf '%-24s %-14s %-10s %s\n' "CONNECTOR" "STATUS" "EDID" "ENABLED"
     for card in /sys/class/drm/card*-*; do
         [ -e "$card/status" ] || continue
-        printf '%-28s %s\n' "$(basename "$card")" "$(cat "$card/status" 2>/dev/null)"
+        printf '%-24s %-14s %-10s %s\n' \
+            "$(basename "$card")" \
+            "$(cat "$card/status" 2>/dev/null)" \
+            "$(stat -c '%s bytes' "$card/edid" 2>/dev/null || echo '-')" \
+            "$(cat "$card/enabled" 2>/dev/null || echo '-')"
     done
+    printf '\nAn EDID of 0 bytes is normal with the proprietary NVIDIA driver:\n'
+    printf 'it does not publish EDID through sysfs, so identity has to come\n'
+    printf 'from ddcutil instead.\n'
+
+    printf '\n--- EDID from sysfs, where the driver publishes it ---\n'
+    for card in /sys/class/drm/card*-*; do
+        [ -s "$card/edid" ] || continue
+        printf '%s: ' "$(basename "$card")"
+        if command -v xxd >/dev/null 2>&1; then
+            xxd -p "$card/edid" | tr -d '\n'
+            printf '\n'
+        else
+            printf '(install xxd to dump it)\n'
+        fi
+    done
+
+    if [ "$HAVE_DDCUTIL" -eq 0 ]; then
+        section "end (ddcutil not installed)"
+        printf 'Install ddcutil and re-run this script to capture monitor identity,\n'
+        printf 'capabilities and the current input source.\n'
+        printf 'No VCP value was written by this script.\n'
+        exit 0
+    fi
 
     section "ddcutil detect (identity)"
     capture ddcutil detect
