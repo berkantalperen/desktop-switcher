@@ -1,0 +1,10 @@
+# Default: normalise to LF in the repository.
+* text=auto eol=lf
+
+# Shell scripts must keep LF even when checked out on Windows: this one gets
+# copied to the Ubuntu host, and bash rejects a CRLF shebang line.
+*.sh text eol=lf
+
+# Captured tool output is evidence. Git must not rewrite a single byte of it,
+# or the parser tests stop testing what the tools actually printed.
+tests/fixtures/** -text
