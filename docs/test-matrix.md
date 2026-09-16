@@ -58,11 +58,12 @@ available, and you can reach each monitor's on-screen menu by hand.
 | 4 | Capabilities on both hosts | Feature `0x60` and its values shown, labelled as claims | **passed 2026-09-16** on both |
 | 4b | DDC reachable from the non-displaying computer | The idle computer can still read `0x60` | **passed 2026-09-16** — the Z4 reads `0x11` while Windows drives the panel |
 | 5 | Single monitor, → Ubuntu | The nominated panel shows Ubuntu; recovery works | **passed 2026-09-16** — `test-input --code 0x0F` issued from the Z4, panel switched, recovered with the monitor buttons |
-| 6 | Single monitor, → Windows | Mirror of case 5, issued by the tool | not run — the return trip was done by hand, not by `switch` |
+| 6 | Single monitor, → Windows | Mirror of case 5, issued by the tool | **passed 2026-09-16** — `switch windows` from the Z4, confirmed by read |
+| 6c | Full round trip via `switch` | Both directions issued by the tool and verified | **passed 2026-09-16** — `switch ubuntu` then `switch windows`, both `confirmed by read` |
 | 6b | Readback tracks a manual OSD change | A change made with the monitor buttons is visible to the tool | **passed 2026-09-16** — five consecutive reads returned `0x11` after a manual switch back |
 | 7 | Both monitors, each direction | Both switch; per-monitor result and timing recorded | not run |
 | 8 | Mixed initial inputs | An explicit target converges both panels on the requested computer | not run |
-| 9 | Repeated same destination | No write is issued the second time; no cycling | covered by tier 1, not yet on hardware |
+| 9 | Repeated same destination | No write is issued the second time; no cycling | **passed 2026-09-16** on hardware — second `switch windows` reported "already on the requested input; no write issued" |
 | 10 | Monitor order changes (sleep, dock re-enumeration) | No write lands on the wrong display | not run |
 | 11 | Sleep / wake / dock reconnect | Re-enumeration is safe, or fails clearly | not run |
 | 12 | PowerToys closed, or `/dev/i2c` denied | Actionable error; no root requirement, no fallback to monitor 1 | not run |

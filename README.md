@@ -19,14 +19,20 @@ human has confirmed.
 |---|---|
 | A — Windows discovery and evidence | **done**, see [docs/hardware-inventory.md](docs/hardware-inventory.md) |
 | A — Ubuntu discovery | **done** — the panel is identified by the same serial from both computers |
-| B — hardware verification of input codes | **not started**; no VCP `0x60` write has ever been issued to these monitors |
+| B — hardware verification of input codes | **done for the shared monitor** — both codes user-confirmed |
 | C — Rust workspace, backends, CLI | **done** — builds, tests and runs natively on both computers; both backends validated against real tool output |
-| D — two-monitor switch transaction | **implemented**, exercised against the fake backend; unproven on hardware |
+| D — switch transaction | **working on hardware** from the Z4, both directions confirmed by read. The Windows side still needs its own `configure`. |
 | E — shortcuts and packaging | documented below, not yet installed |
 | F — keyboard/mouse switching | out of scope for v1 |
 
-Gate A is met: the same physical monitor is identifiable from both computers,
-and each computer can reach it over DDC even while the other one is driving it.
+Gates A and B are met, and the round trip works: `switch ubuntu` then
+`switch windows` from the Z4 both moved the panel and confirmed it by
+reading the value back. Running the same command twice issues no second
+write.
+
+The one caveat is scope, not correctness: only one of the two AOC panels is
+currently cabled to both computers, so "both monitors" is one monitor until a
+second cable goes into the other panel.
 
 **`switch` will refuse to run until Stage B is complete.** That is deliberate,
 not an unfinished edge: no input code becomes usable until someone has watched
