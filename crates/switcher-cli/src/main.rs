@@ -128,6 +128,9 @@ enum Command {
     /// Move windows off a monitor without detaching it.
     Sweep { monitor: Option<String> },
 
+    /// Make a monitor this computer's primary display.
+    Primary { monitor: Option<String> },
+
     /// Live readings, alongside the last destination this tool requested.
     Status,
 
@@ -287,6 +290,7 @@ fn run() -> Result<i32> {
         Command::Release { monitor } => desktop::release(&app, monitor.as_deref()),
         Command::Claim { monitor } => desktop::claim(&app, monitor.as_deref()),
         Command::Sweep { monitor } => desktop::sweep(&app, monitor.as_deref()),
+        Command::Primary { monitor } => desktop::set_primary(&app, monitor.as_deref()),
         Command::Status => commands::status(&app),
         Command::Toggle {
             dry_run,

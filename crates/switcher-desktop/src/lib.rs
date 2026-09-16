@@ -138,6 +138,14 @@ pub trait DesktopManager {
     /// Move windows off `display` onto somewhere still visible.
     fn sweep_windows_off(&self, display: &DesktopDisplay) -> Result<SweepReport, DesktopError>;
 
+    /// Make `display` the primary one.
+    ///
+    /// Needed because Windows refuses to detach the primary display, so
+    /// releasing one that happens to be primary means promoting another
+    /// first. Implementations must reposition the rest of the desktop to
+    /// match, since the primary display defines the origin.
+    fn set_primary(&self, display: &DesktopDisplay) -> Result<(), DesktopError>;
+
     /// Detach `display` from the desktop, returning what is needed to restore
     /// it. Must refuse when no other usable display would remain.
     fn detach(&self, display: &DesktopDisplay) -> Result<SavedDisplayMode, DesktopError>;
@@ -162,6 +170,10 @@ impl DesktopManager for NoopDesktop {
 
     fn sweep_windows_off(&self, _display: &DesktopDisplay) -> Result<SweepReport, DesktopError> {
         Ok(SweepReport::default())
+    }
+
+    fn set_primary(&self, _display: &DesktopDisplay) -> Result<(), DesktopError> {
+        Err(DesktopError::Unsupported)
     }
 
     fn detach(&self, _display: &DesktopDisplay) -> Result<SavedDisplayMode, DesktopError> {
@@ -231,18 +243,28 @@ pub fn detach_is_safe(displays: &[DesktopDisplay], display: &DesktopDisplay) -> 
             "it is the only attached display, so detaching it would leave no screen at all".into(),
         );
     }
-    // Windows rejects this outright, with DISP_CHANGE_BADMODE and no
-    // explanation of its own. Catch it here so the user gets a reason and an
-    // action rather than a return code.
-    if display.is_primary {
-        return Err(
-            "Windows cannot detach the primary display. Make another display primary first \
-             (Settings > System > Display > select a display > \"Make this my main display\"), \
-             then try again"
-                .into(),
-        );
-    }
+    // Being the primary display is not refused here: Windows will not detach
+    // it, but another display can be promoted first. That there is something
+    // to promote is exactly what the check above established.
     Ok(())
+}
+
+/// Which display should become primary so `leaving` can be detached.
+///
+/// Windows refuses to detach the primary display, so releasing one that
+/// happens to be primary means handing the role to something else first.
+/// Returns `None` when `leaving` is not primary and nothing needs to change.
+pub fn promotion_target<'a>(
+    displays: &'a [DesktopDisplay],
+    leaving: &DesktopDisplay,
+) -> Option<&'a DesktopDisplay> {
+    if !leaving.is_primary {
+        return None;
+    }
+    displays
+        .iter()
+        .filter(|d| d.is_attached && d.gdi_name != leaving.gdi_name && !d.rect.is_empty())
+        .max_by_key(|d| i64::from(d.rect.width()) * i64::from(d.rect.height()))
 }
 
 #[cfg(test)]
@@ -346,14 +368,39 @@ mod tests {
     }
 
     #[test]
-    fn detaching_the_primary_display_is_refused_with_an_action() {
+    fn detaching_the_primary_is_allowed_because_another_can_be_promoted() {
         let primary = display("\\\\.\\DISPLAY5", "p5", rect(0, 0, 1920, 1080), true);
         let other = display("\\\\.\\DISPLAY1", "p1", rect(1920, 0, 2560, 1600), false);
         let displays = vec![primary.clone(), other];
-        let err = detach_is_safe(&displays, &primary).unwrap_err();
-        assert!(err.contains("primary"), "{err}");
-        // The message has to say what to do, not just what went wrong.
-        assert!(err.contains("main display"), "{err}");
+        assert!(detach_is_safe(&displays, &primary).is_ok());
+        assert_eq!(
+            promotion_target(&displays, &primary).unwrap().gdi_name,
+            "\\\\.\\DISPLAY1"
+        );
+    }
+
+    #[test]
+    fn nothing_is_promoted_when_the_departing_display_is_not_primary() {
+        let leaving = display("\\\\.\\DISPLAY5", "p5", rect(0, 0, 1920, 1080), false);
+        let displays = vec![
+            leaving.clone(),
+            display("\\\\.\\DISPLAY1", "p1", rect(1920, 0, 2560, 1600), true),
+        ];
+        assert!(promotion_target(&displays, &leaving).is_none());
+    }
+
+    #[test]
+    fn promotion_picks_the_largest_remaining_display() {
+        let primary = display("\\\\.\\DISPLAY5", "p5", rect(0, 0, 1920, 1080), true);
+        let displays = vec![
+            primary.clone(),
+            display("\\\\.\\DISPLAY6", "p6", rect(-1920, 0, 1920, 1080), false),
+            display("\\\\.\\DISPLAY1", "p1", rect(1920, 0, 2560, 1600), false),
+        ];
+        assert_eq!(
+            promotion_target(&displays, &primary).unwrap().gdi_name,
+            "\\\\.\\DISPLAY1"
+        );
     }
 
     #[test]

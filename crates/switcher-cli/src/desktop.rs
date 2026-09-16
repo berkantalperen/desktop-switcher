@@ -26,6 +26,14 @@ use crate::App;
 pub struct ReleasedState {
     #[serde(default)]
     pub released: BTreeMap<String, SavedDisplayMode>,
+    /// Displays that were the Windows primary when they were released.
+    ///
+    /// Windows refuses to detach the primary display, so releasing one means
+    /// handing the role to another screen first. Remembering that lets
+    /// `claim` give it back rather than silently leaving the desktop
+    /// rearranged.
+    #[serde(default)]
+    pub was_primary: Vec<String>,
 }
 
 impl ReleasedState {
@@ -191,6 +199,32 @@ pub fn displays(app: &App) -> Result<i32> {
     Ok(0)
 }
 
+/// Make a monitor the primary display.
+///
+/// Part of layer 2 in its own right, and the operation `release` needs first
+/// when the display it is detaching happens to be primary.
+pub fn set_primary(app: &App, monitor: Option<&str>) -> Result<i32> {
+    let (backend_id, label) = target_monitor(app, monitor)?;
+    let detected = app.backend.discover().unwrap_or_default();
+    let manager = manager(&detected);
+    let display = display_for(manager.as_ref(), &backend_id)?;
+
+    if display.is_primary {
+        println!("`{label}` is already the primary display. Nothing to do.");
+        return Ok(0);
+    }
+    manager.set_primary(&display)?;
+    app.log.append(
+        "desktop.set-primary",
+        &[
+            ("monitor", label.clone()),
+            ("gdi", display.gdi_name.clone()),
+        ],
+    );
+    println!("`{label}` is now the primary display.");
+    Ok(0)
+}
+
 pub fn release(app: &App, monitor: Option<&str>) -> Result<i32> {
     let (backend_id, label) = target_monitor(app, monitor)?;
     let detected = app.backend.discover().unwrap_or_default();
@@ -202,9 +236,62 @@ pub fn release(app: &App, monitor: Option<&str>) -> Result<i32> {
         return Ok(0);
     }
 
-    let saved = manager.detach(&display)?;
+    // Windows will not detach the primary display, so hand the role over
+    // first and remember that we did.
+    let was_primary = display.is_primary;
+    let display = if was_primary {
+        let all = manager.displays()?;
+        let Some(promote) = switcher_desktop::promotion_target(&all, &display) else {
+            bail!(
+                "`{label}` is the primary display and there is no other attached display \
+                 to hand that role to, so it cannot be released."
+            );
+        };
+        println!(
+            "`{label}` is the primary display; making {} primary first.",
+            promote
+                .friendly_name
+                .as_deref()
+                .unwrap_or(&promote.gdi_name)
+        );
+        manager.set_primary(promote)?;
+        // Geometry moved when the origin moved, so re-read it.
+        display_for(manager.as_ref(), &backend_id)?
+    } else {
+        display
+    };
+
+    // Promotion has already changed the desktop. If the detach now fails,
+    // undo it rather than leave a half-finished rearrangement behind: the
+    // user asked to release a monitor, not to have their primary display
+    // quietly moved somewhere else and left there.
+    let saved = match manager.detach(&display) {
+        Ok(saved) => saved,
+        Err(detach_error) if was_primary => {
+            let rollback = display_for(manager.as_ref(), &backend_id)
+                .and_then(|d| manager.set_primary(&d).map_err(Into::into));
+            return match rollback {
+                Ok(()) => Err(anyhow!(
+                    "{detach_error}\n\nThe primary display was moved in order to attempt this \
+                     and has been put back, so nothing has changed overall."
+                )),
+                Err(rollback_error) => Err(anyhow!(
+                    "{detach_error}\n\nWorse: `{label}` had already been demoted from primary \
+                     to attempt the detach, and restoring it failed too ({rollback_error}). \
+                     Your desktop arrangement has changed. Put it back in Settings > System > \
+                     Display: select the display you want and tick \"Make this my main \
+                     display\"."
+                )),
+            };
+        }
+        Err(detach_error) => return Err(detach_error.into()),
+    };
+
     let mut state = ReleasedState::load(&app.state_dir);
     state.released.insert(backend_id.clone(), saved);
+    if was_primary && !state.was_primary.contains(&backend_id) {
+        state.was_primary.push(backend_id.clone());
+    }
     state.save(&app.state_dir)?;
 
     app.log.append(
@@ -248,6 +335,21 @@ pub fn claim(app: &App, monitor: Option<&str>) -> Result<i32> {
 
     manager.attach(&display, saved)?;
     state.released.remove(&key);
+
+    // Give the primary role back if releasing had taken it away.
+    let restore_primary = state.was_primary.contains(&key);
+    if restore_primary {
+        // Re-read: the display only exists in the desktop again now.
+        match display_for(manager.as_ref(), &backend_id)
+            .and_then(|d| manager.set_primary(&d).map_err(Into::into))
+        {
+            Ok(()) => println!("Restored `{label}` as the primary display."),
+            Err(e) => ui::warn(format!(
+                "reattached `{label}` but could not make it primary again: {e}"
+            )),
+        }
+        state.was_primary.retain(|p| *p != key);
+    }
     state.save(&app.state_dir)?;
 
     app.log.append(

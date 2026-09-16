@@ -12,9 +12,10 @@ use std::mem::size_of;
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
-    ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsW, CDS_NORESET, CDS_TYPE,
-    CDS_UPDATEREGISTRY, DEVMODEW, DISPLAY_DEVICEW, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL,
-    DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS,
+    ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsW, CDS_NORESET,
+    CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY, DEVMODEW, DISPLAY_DEVICEW,
+    DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
+    DM_POSITION, ENUM_CURRENT_SETTINGS,
 };
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -144,16 +145,24 @@ fn disp_change_reason(code: i32) -> &'static str {
     }
 }
 
-fn apply(gdi_name: &str, dm: &DEVMODEW, operation: &str) -> Result<(), DesktopError> {
+/// Stage a change for one display without applying it yet.
+///
+/// Promotion has to move every display in the same commit, because the
+/// primary defines the origin and Windows will reject an arrangement that is
+/// inconsistent halfway through.
+fn stage(
+    gdi_name: &str,
+    dm: &DEVMODEW,
+    extra_flags: CDS_TYPE,
+    operation: &str,
+) -> Result<(), DesktopError> {
     let name = wide_nul(gdi_name);
-    // CDS_NORESET stages the change; the second call with a null device name
-    // is what actually commits the new topology.
     let staged = unsafe {
         ChangeDisplaySettingsExW(
             PCWSTR(name.as_ptr()),
             Some(dm as *const DEVMODEW),
             None,
-            CDS_UPDATEREGISTRY | CDS_NORESET,
+            CDS_UPDATEREGISTRY | CDS_NORESET | extra_flags,
             None,
         )
     };
@@ -167,7 +176,11 @@ fn apply(gdi_name: &str, dm: &DEVMODEW, operation: &str) -> Result<(), DesktopEr
             ),
         });
     }
+    Ok(())
+}
 
+/// Apply everything staged so far.
+fn commit(operation: &str) -> Result<(), DesktopError> {
     let committed =
         unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None) };
     if committed != DISP_CHANGE_SUCCESSFUL {
@@ -181,6 +194,11 @@ fn apply(gdi_name: &str, dm: &DEVMODEW, operation: &str) -> Result<(), DesktopEr
         });
     }
     Ok(())
+}
+
+fn apply(gdi_name: &str, dm: &DEVMODEW, operation: &str) -> Result<(), DesktopError> {
+    stage(gdi_name, dm, CDS_TYPE(0), operation)?;
+    commit(operation)
 }
 
 impl DesktopManager for WindowsDesktop {
@@ -301,6 +319,60 @@ impl DesktopManager for WindowsDesktop {
         Ok(ctx.report)
     }
 
+    fn set_primary(&self, display: &DesktopDisplay) -> Result<(), DesktopError> {
+        ensure_dpi_aware();
+        let displays = self.displays()?;
+        let target = displays
+            .iter()
+            .find(|d| d.gdi_name == display.gdi_name)
+            .ok_or_else(|| DesktopError::DisplayNotFound(display.gdi_name.clone()))?;
+
+        if target.is_primary {
+            return Ok(());
+        }
+        if !target.is_attached {
+            return Err(DesktopError::RefusedUnsafe {
+                display: target.gdi_name.clone(),
+                reason: "it is not attached, so it cannot be made primary".into(),
+            });
+        }
+
+        // The primary display must sit at the origin, so promoting one means
+        // shifting every other display by the same amount. All of it is
+        // staged and committed together; a partial arrangement is rejected.
+        let dx = -target.rect.left;
+        let dy = -target.rect.top;
+        let operation = format!("making {} primary", target.gdi_name);
+
+        // The new primary must be staged first. Staging another display
+        // before it makes the driver reject the batch with
+        // DISP_CHANGE_FAILED, because the origin it is being positioned
+        // against has not moved yet.
+        let ordered = std::iter::once(target).chain(
+            displays
+                .iter()
+                .filter(|d| d.gdi_name != target.gdi_name && d.is_attached && !d.rect.is_empty()),
+        );
+
+        for d in ordered {
+            let Some(mut dm) = current_mode(&d.gdi_name) else {
+                continue;
+            };
+            dm.dmFields = DM_POSITION;
+            dm.Anonymous1.Anonymous2.dmPosition.x = d.rect.left + dx;
+            dm.Anonymous1.Anonymous2.dmPosition.y = d.rect.top + dy;
+
+            let extra = if d.gdi_name == target.gdi_name {
+                CDS_SET_PRIMARY
+            } else {
+                CDS_TYPE(0)
+            };
+            stage(&d.gdi_name, &dm, extra, &operation)?;
+        }
+
+        commit(&operation)
+    }
+
     fn detach(&self, display: &DesktopDisplay) -> Result<SavedDisplayMode, DesktopError> {
         if self.is_protected(display) {
             return Err(DesktopError::RefusedUnsafe {
@@ -330,11 +402,24 @@ impl DesktopManager for WindowsDesktop {
             bits_per_pixel: dm.dmBitsPerPel,
         };
 
-        // A DEVMODE of all zeroes is how Windows is told to drop a display.
-        let mut blank = blank_devmode();
-        blank.dmFields =
+        // Detaching means handing back a mode whose size fields are zero.
+        //
+        // A wholly zeroed DEVMODE is the recipe usually quoted, and this
+        // driver rejects it with DISP_CHANGE_BADMODE. Starting from the live
+        // mode keeps dmSize, dmDriverExtra and the device name consistent
+        // with what the driver expects, and only blanks the fields that say
+        // "no longer part of the desktop".
+        let mut detached = current_mode(&display.gdi_name).unwrap_or_else(blank_devmode);
+        detached.dmPelsWidth = 0;
+        detached.dmPelsHeight = 0;
+        detached.dmBitsPerPel = 0;
+        detached.dmDisplayFrequency = 0;
+        detached.Anonymous1.Anonymous2.dmPosition.x = 0;
+        detached.Anonymous1.Anonymous2.dmPosition.y = 0;
+        detached.dmFields =
             DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
-        apply(&display.gdi_name, &blank, "detaching the display")?;
+
+        apply(&display.gdi_name, &detached, "detaching the display")?;
 
         Ok(saved)
     }
