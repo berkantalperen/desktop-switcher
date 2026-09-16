@@ -209,12 +209,33 @@ same evidence labelling as the Windows side.
 Five tests are skipped on Linux relative to Windows; they are the Windows
 registry EDID tests, which are `cfg`-gated.
 
+### Verified mapping for `ASFPA9A001108`
+
+Both codes are now `user-confirmed`, and the Z4's configuration is complete:
+
+| Destination | Code | How it was established |
+|---|---|---|
+| `windows` | `0x11` (HDMI-1) | Read from the monitor while the user confirmed it was displaying Windows. No write. |
+| `ubuntu` | `0x0F` (DisplayPort-1) | `test-input` issued the write from the Z4 on 2026-09-16; the user watched the panel switch to Ubuntu. |
+
+`desktop-switcher doctor` on the Z4 reports no blockers.
+
+Two further observations from that test:
+
+- **`setvcp 60 0x0F` works on this hardware.** The panel switched on the first
+  write, with no retry.
+- **Readback tracks reality, including manual changes.** After the user
+  returned the panel to Windows with the monitor's own buttons, five
+  consecutive reads all reported `0x11`. This panel does not report a stale
+  input, which means `status` is trustworthy here and `toggle` has a sound
+  basis. That is a property of this monitor, not a guarantee in general.
+
 ### Outstanding on this host
 
 | Item | Status |
 |---|---|
-| Input code that selects Ubuntu, per panel | `reported` — inferred, not yet proven by a switch |
-| Behaviour of `setvcp` on this hardware | `unknown` — no write has been issued |
+| `switch ubuntu` / `switch windows` end to end | not run — only `test-input` has written so far |
+| Return trip issued by the tool | not run — the user recovered by hand |
 
 ### The cabling question
 

@@ -57,8 +57,9 @@ available, and you can reach each monitor's on-screen menu by hand.
 | 3 | Serials agree across the two hosts | The same serial identifies the same panel on both | **passed 2026-09-16** — `ASFPA9A001108` from both, and byte-identical capability strings |
 | 4 | Capabilities on both hosts | Feature `0x60` and its values shown, labelled as claims | **passed 2026-09-16** on both |
 | 4b | DDC reachable from the non-displaying computer | The idle computer can still read `0x60` | **passed 2026-09-16** — the Z4 reads `0x11` while Windows drives the panel |
-| 5 | Single monitor, Windows → Ubuntu | The nominated panel shows Ubuntu; recovery works | not run |
-| 6 | Single monitor, Ubuntu → Windows | Mirror of case 5 | not run |
+| 5 | Single monitor, → Ubuntu | The nominated panel shows Ubuntu; recovery works | **passed 2026-09-16** — `test-input --code 0x0F` issued from the Z4, panel switched, recovered with the monitor buttons |
+| 6 | Single monitor, → Windows | Mirror of case 5, issued by the tool | not run — the return trip was done by hand, not by `switch` |
+| 6b | Readback tracks a manual OSD change | A change made with the monitor buttons is visible to the tool | **passed 2026-09-16** — five consecutive reads returned `0x11` after a manual switch back |
 | 7 | Both monitors, each direction | Both switch; per-monitor result and timing recorded | not run |
 | 8 | Mixed initial inputs | An explicit target converges both panels on the requested computer | not run |
 | 9 | Repeated same destination | No write is issued the second time; no cycling | covered by tier 1, not yet on hardware |
