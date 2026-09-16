@@ -573,42 +573,55 @@ pub fn configure(app: &mut App) -> Result<i32> {
 
     ui::heading("Configure");
     println!("Nothing is written to a monitor by this command except where it");
-    println!("asks you first, one monitor at a time.\n");
+    println!("asks you first, one monitor at a time.");
+    println!("\nPress Enter to accept any suggestion in [brackets].");
 
     let existing = app.config.clone();
-    let host = ui::ask(
-        "A name for this computer",
-        Some(
-            existing
-                .as_ref()
-                .map(|c| c.host.as_str())
-                .unwrap_or(if cfg!(windows) {
-                    "windows-laptop"
-                } else {
-                    "ubuntu-workstation"
-                }),
-        ),
-    )?;
+
+    // Two names, and they are the words typed at the command line. Asking
+    // separately for a "host name" and a "destination name" only invited
+    // people to give this computer the other computer's name.
+    ui::heading("Naming the two computers");
+    println!("These are the words you will type to switch, as in");
+    println!("`desktop-switcher switch <name>`. Short and lowercase is easiest.\n");
+
+    let default_self = existing
+        .as_ref()
+        .map(|c| c.self_destination.clone())
+        .unwrap_or_else(|| if cfg!(windows) { "windows" } else { "ubuntu" }.to_string());
     let self_destination = ui::ask(
-        "The destination name that means THIS computer",
-        Some(
-            existing
-                .as_ref()
-                .map(|c| c.self_destination.as_str())
-                .unwrap_or(if cfg!(windows) { "windows" } else { "ubuntu" }),
+        &format!(
+            "  Name for THIS computer, the one you are typing on ({})",
+            system_hostname()
         ),
+        Some(&default_self),
     )?;
-    let other_destination = ui::ask(
-        "The destination name for the OTHER computer",
-        Some(if self_destination == "windows" {
-            "ubuntu"
-        } else {
-            "windows"
-        }),
-    )?;
+
+    let default_other = existing
+        .as_ref()
+        .and_then(|c| {
+            c.destinations()
+                .into_iter()
+                .find(|d| *d != self_destination)
+        })
+        .unwrap_or_else(|| {
+            if self_destination == "windows" {
+                "ubuntu"
+            } else {
+                "windows"
+            }
+            .to_string()
+        });
+    let other_destination = ui::ask("  Name for the OTHER computer", Some(&default_other))?;
+
     if other_destination == self_destination {
-        bail!("The two destinations must have different names.");
+        bail!("Both computers cannot be called `{self_destination}`. Run configure again and give them different names.");
     }
+    println!("\n  `switch {self_destination}` will bring the monitors here.");
+    println!("  `switch {other_destination}` will send them to the other computer.");
+
+    // Only used for display and logs, so there is no reason to ask.
+    let host = system_hostname();
 
     let mut config = Config::new(host, app.backend_kind, self_destination.clone());
     if let Some(prev) = &existing {
@@ -643,12 +656,23 @@ pub fn configure(app: &mut App) -> Result<i32> {
             continue;
         }
 
-        let suggested = if used_ids.is_empty() { "left" } else { "right" };
+        // With two identical panels the useful label is where they sit; with
+        // one, asking for a "physical position" is just puzzling.
+        let only_one = switchable.len() == 1;
+        let suggested = if only_one {
+            "main"
+        } else if used_ids.is_empty() {
+            "left"
+        } else {
+            "right"
+        };
+        let question = if only_one {
+            "  A short label for this display, used as `--monitor <label>`"
+        } else {
+            "  Where does this display physically sit (e.g. left, right)?"
+        };
         let logical_id = loop {
-            let answer = ui::ask(
-                "  Which physical position is this display in?",
-                Some(suggested),
-            )?;
+            let answer = ui::ask(question, Some(suggested))?;
             if used_ids.contains(&answer) {
                 println!("  (`{answer}` is already used)");
                 continue;
@@ -979,6 +1003,24 @@ fn resolve_detected<'a>(
             many.len()
         ),
     }
+}
+
+/// This machine's hostname, used only for display and logs.
+///
+/// Deliberately not a prompt: it is not something anyone should have to
+/// invent, and asking for it right beside the switch names invited answering
+/// it with the *other* computer's name.
+fn system_hostname() -> String {
+    let from_env = if cfg!(windows) {
+        std::env::var("COMPUTERNAME").ok()
+    } else {
+        std::env::var("HOSTNAME").ok()
+    };
+    from_env
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "this-computer".to_string())
 }
 
 /// Wrap text for the indented remedy lines in `doctor`.
