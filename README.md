@@ -156,6 +156,28 @@ Step 4 is the only way a code becomes usable. See
 
 ## Commands
 
+### Layer 2 — this computer's desktop
+
+Separate from the monitor's input. Both computers can have the same monitor
+attached at once, which is why a window can strand on a screen showing the
+other machine.
+
+| Command | State |
+|---|---|
+| `displays` | working |
+| `sweep` — move windows off, stay attached | working |
+| `primary` — make a monitor primary | unreliable on this driver |
+| `release` / `claim` — detach and reattach | **not working**; the legacy Win32 detach is rejected by this driver |
+
+`switch --sweep`, `--release` and `--claim` apply one of these as part of a
+switch, and `[on_switch]` sets what a bare `switch` does. Both default to
+nothing, so `switch` is input-only unless you ask otherwise.
+
+See [docs/troubleshooting.md](docs/troubleshooting.md) for what is known
+about the two that do not work.
+
+### Commands
+
 | Command | Writes? | Purpose |
 |---|---|---|
 | `doctor` | no | Backend, permissions, configuration and identification checks |

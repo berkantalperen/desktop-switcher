@@ -66,6 +66,46 @@ reading; the code for the other computer cannot, and needs `test-input`.
 
 ---
 
+## Desktop attachment (layer 2)
+
+`switch` changes the monitor's input. Whether *this* computer still draws on
+that monitor is a separate thing, and both computers can have it attached at
+once — which is why a window can end up on a screen you cannot see.
+
+| Command | What it does | State |
+|---|---|---|
+| `displays` | what this desktop sees, and what is attached | **working** |
+| `sweep` | move windows off a monitor, leave it attached | **working** |
+| `primary` | make a monitor the primary display | **unreliable**, see below |
+| `release` | detach a monitor from this desktop | **not working**, see below |
+| `claim` | reattach a released monitor | untested — nothing has been released |
+
+### `release` fails with DISP_CHANGE_BADMODE
+
+The legacy `ChangeDisplaySettingsEx` detach does not work on the NVIDIA/Intel
+driver this was developed against. Two DEVMODE recipes were tried — a fully
+zeroed one, and one derived from the live mode with only the size fields
+blanked — and both are rejected with `DISP_CHANGE_BADMODE (-2)` even when the
+display is not primary.
+
+`SetDisplayConfig` is the modern API for topology changes and is the likely
+fix, but it is a separate piece of work and is not implemented.
+
+Until then, use `sweep`: it solves the stranded-window problem without
+touching topology at all, and cannot leave you short a screen.
+
+### `primary` fails with DISP_CHANGE_FAILED
+
+Promotion succeeded once and has since been refused in the reverse direction
+with `DISP_CHANGE_FAILED (-1)`. The geometry is right — the origin moves and
+every other display shifts by the same delta, staged and committed as one
+batch — but the driver rejects some arrangements for reasons not yet
+established.
+
+If `release` moved your primary and could not put it back, it says so. Fix it
+by hand: **Settings → System → Display**, select the display you want, and
+tick **"Make this my main display"**. Windows repositions the rest for you.
+
 ## Windows
 
 ### The Power Display CLI cannot be found
