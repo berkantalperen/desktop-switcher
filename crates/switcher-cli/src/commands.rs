@@ -634,6 +634,15 @@ pub fn configure(app: &mut App) -> Result<i32> {
             println!("  currently showing input: {}", InputReading::Value(code));
         }
 
+        // A display that is only ever cabled to one computer does not need
+        // managing, and configuring it would make every switch to the other
+        // computer refuse on its behalf. Skipping leaves it alone; `plan`
+        // still reports it as attached-but-not-configured.
+        if !ui::confirm("  Manage this display with desktop-switcher?")? {
+            println!("  Skipped. It will be left exactly as it is.");
+            continue;
+        }
+
         let suggested = if used_ids.is_empty() { "left" } else { "right" };
         let logical_id = loop {
             let answer = ui::ask(
@@ -714,6 +723,13 @@ pub fn configure(app: &mut App) -> Result<i32> {
         }
 
         config.monitors.push(monitor_config);
+    }
+
+    if config.monitors.is_empty() {
+        bail!(
+            "No display was selected for management, so there is nothing to save. \
+             The existing configuration, if any, was left untouched."
+        );
     }
 
     config.validate()?;
