@@ -1,0 +1,4 @@
+Monitor 2 (27P2DG5)
+  protocol           DDC/CI
+  id                 \\?\DISPLAY#AOC2702#5&23e00778&0&UID4613
+  input-source       HDMI-1 (0x11)

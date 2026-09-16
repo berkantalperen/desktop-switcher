@@ -1,0 +1,2 @@
+Error: no monitor found with id NO-SUCH-MONITOR
+  hint: run 'PowerToys.PowerDisplay.Cli.exe list' to see available monitors

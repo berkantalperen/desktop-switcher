@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/switcher-core",
+    "crates/switcher-backend-powertoys",
+    "crates/switcher-backend-ddcutil",
+    "crates/switcher-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/berkant/desktop-switcher"
+
+[workspace.dependencies]
+switcher-core = { path = "crates/switcher-core" }
+switcher-backend-powertoys = { path = "crates/switcher-backend-powertoys" }
+switcher-backend-ddcutil = { path = "crates/switcher-backend-ddcutil" }
+
+anyhow = "1.0.99"
+clap = { version = "4.5.48", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.8.23"
+thiserror = "2.0.17"
+directories = "6.0.0"
+time = { version = "0.3.44", features = ["formatting", "parsing", "macros"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

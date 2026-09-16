@@ -1,0 +1,31 @@
+Display 1
+   I2C bus:             /dev/i2c-5
+   DRM connector:       card1-DP-1
+   EDID synopsis:
+      Mfg id:               AOC - (Unknown manufacturer)
+      Model:                27P2Q
+      Product code:         9986  (0x2702)
+      Serial number:        ASFPA9A001108
+      Binary serial number: 16843009 (0x01010101)
+      Manufacture year:     2023,  Week: 41
+   VCP version:         2.2
+
+Display 2
+   I2C bus:             /dev/i2c-6
+   DRM connector:       card1-HDMI-A-1
+   EDID synopsis:
+      Mfg id:               AOC - (Unknown manufacturer)
+      Model:                27P2Q
+      Product code:         9986  (0x2702)
+      Serial number:        ASFPA9A001109
+      Binary serial number: 16843010 (0x01010102)
+      Manufacture year:     2023,  Week: 41
+   VCP version:         2.2
+
+Invalid display
+   I2C bus:             /dev/i2c-3
+   DRM connector:       card0-None-1
+   EDID synopsis:
+      Mfg id:               ABC
+      Model:                Some Panel
+   Monitor does not support DDC

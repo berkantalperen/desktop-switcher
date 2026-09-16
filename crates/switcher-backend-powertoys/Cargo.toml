@@ -1,0 +1,13 @@
+[package]
+name = "switcher-backend-powertoys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+switcher-core.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56.0"

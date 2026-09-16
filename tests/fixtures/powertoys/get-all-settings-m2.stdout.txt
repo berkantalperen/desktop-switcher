@@ -1,0 +1,10 @@
+Monitor 2 (27P2DG5)
+  protocol           DDC/CI
+  id                 \\?\DISPLAY#AOC2702#5&23e00778&0&UID4613
+  brightness         95%
+  contrast           50%
+  volume             50%
+  color-temperature  6500K (0x05)
+  input-source       HDMI-1 (0x11)
+  power-state        On (0x01)
+  orientation        0°

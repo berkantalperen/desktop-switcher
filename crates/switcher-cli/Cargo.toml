@@ -1,0 +1,18 @@
+[package]
+name = "switcher-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "desktop-switcher"
+path = "src/main.rs"
+
+[dependencies]
+switcher-core.workspace = true
+switcher-backend-powertoys.workspace = true
+switcher-backend-ddcutil.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true

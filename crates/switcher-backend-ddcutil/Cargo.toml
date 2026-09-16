@@ -1,0 +1,10 @@
+[package]
+name = "switcher-backend-ddcutil"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+switcher-core.workspace = true
+thiserror.workspace = true

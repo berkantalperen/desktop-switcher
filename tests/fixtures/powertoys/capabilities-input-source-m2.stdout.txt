@@ -1,0 +1,6 @@
+Monitor 2 (27P2DG5) via DDC/CI
+  Model: 27P2Q
+  MCCS:  2.2
+  VCP codes:
+    0x60 Input Source: VGA-1 (0x01), DVI-1 (0x03), HDMI-1 (0x11), DisplayPort-1 (0x0F)
+  Raw: (vcp(02 04 05 08 10 12 14(01 05 06 08 0B) 16 18 1A 52 60(01 03 11 0F ) 62 86(02 05) C8 C9 CC(01 02 03 04 05 06 07 09 0A 0B 0C 0D 0E 12 14 16 1E) B6 DF C6 DC(00 0B 0C 0D 0E 0F 10) D6(01 04) ED F8)prot(monitor)type(LCD)cmds(01 02 03 07 0C F3)mccs_ver(2.2)asset_eep(64)mpu_ver(005)model(27P2Q)mswhql(1))

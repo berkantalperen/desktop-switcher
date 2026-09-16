@@ -1,0 +1,102 @@
+# desktop-switcher configuration — SCHEMA EXAMPLE
+#
+# Do NOT copy this file into place and fill in plausible-looking values.
+# Every `REPLACE_...` below must come from real discovery and, for input codes,
+# from a switch a human actually watched happen. Run:
+#
+#     desktop-switcher configure
+#
+# which writes this file for you, and then, for each monitor and the other
+# computer:
+#
+#     desktop-switcher test-input --monitor left --code 0xNN --destination ubuntu
+#
+# Configuration is per-host. The Windows laptop and the Ubuntu workstation each
+# keep their own file; connection ids and input codes do not transfer between
+# them.
+
+schema_version = 1
+
+# A name for this computer. Free-form; only used in output and logs.
+host = "REPLACE_WITH_HOST_NAME"
+
+# "powertoys-cli" on Windows, "ddcutil-cli" on Linux, "fake" for a dry
+# demonstration that touches no hardware.
+backend = "powertoys-cli"
+
+# Which destination name means *this* computer. Used to tell an expected loss
+# of DDC contact (we just switched a monitor to the other machine) apart from a
+# real fault.
+self_destination = "windows"
+
+# Optional: pin the backend executable instead of searching for it. Recommended
+# for keyboard shortcuts, which run with a different environment than a shell.
+# tool_path = "C:\\Users\\you\\AppData\\Local\\PowerToys\\WinUI3Apps\\PowerToys.PowerDisplay.Cli.exe"
+
+# Seconds before a backend command is killed.
+timeout_seconds = 15
+
+# Milliseconds to wait after a write before attempting to read it back. Too
+# short and the monitor has not settled; too long and the shortcut feels slow.
+settle_ms = 1200
+
+# Repeat requests for the same destination inside this window are ignored, so a
+# held-down shortcut key does not issue a burst of writes.
+dedupe_ms = 1500
+
+# Optional: the order writes are issued in. Omit for declaration order. Set it
+# if testing shows one monitor must move before the other.
+# switch_order = ["left", "right"]
+
+
+[[monitors]]
+# The name you use on the command line.
+logical_id = "left"
+name = "AOC 27P2DG5 — left"
+
+# The backend's stable handle, recorded at configure time. On Windows this is
+# the PowerToys monitor id; on Linux, the DRM connector. It identifies the
+# *port*, so it changes if you move the cable.
+backend_id = "REPLACE_AFTER_DISCOVERY"
+
+# The EDID serial. This identifies the *panel*, and is what a binding is
+# actually checked against. If a panel publishes no serial, leave this out and
+# the tool will say so, loudly, every time.
+serial = "REPLACE_AFTER_DISCOVERY"
+model = "REPLACE_AFTER_DISCOVERY"
+
+[monitors.destinations.windows]
+# The input code THIS monitor must be set to in order to show the Windows
+# machine. Always written with an explicit 0x prefix: a bare `11` is rejected,
+# because decimal 11 is 0x0B and switching to the wrong input is expensive.
+input_code = "REPLACE_AFTER_VERIFIED_TEST"
+# One of: unknown, reported, read-confirmed, write-confirmed, user-confirmed.
+# `switch` refuses anything below user-confirmed.
+verification = "user-confirmed"
+verified_on = "REPLACE_WITH_DATE"
+
+[monitors.destinations.ubuntu]
+input_code = "REPLACE_AFTER_VERIFIED_TEST"
+verification = "user-confirmed"
+verified_on = "REPLACE_WITH_DATE"
+
+
+[[monitors]]
+logical_id = "right"
+name = "AOC 27P2DG5 — right"
+backend_id = "REPLACE_AFTER_DISCOVERY"
+serial = "REPLACE_AFTER_DISCOVERY"
+model = "REPLACE_AFTER_DISCOVERY"
+
+# Note that these codes are NOT expected to match the left monitor's. On the
+# hardware this project was built against, the two panels use different inputs
+# for the same computer.
+[monitors.destinations.windows]
+input_code = "REPLACE_AFTER_VERIFIED_TEST"
+verification = "user-confirmed"
+verified_on = "REPLACE_WITH_DATE"
+
+[monitors.destinations.ubuntu]
+input_code = "REPLACE_AFTER_VERIFIED_TEST"
+verification = "user-confirmed"
+verified_on = "REPLACE_WITH_DATE"

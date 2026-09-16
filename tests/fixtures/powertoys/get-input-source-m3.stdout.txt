@@ -1,0 +1,4 @@
+Monitor 3 (27P2DG5)
+  protocol           DDC/CI
+  id                 \\?\DISPLAY#AOC2702#5&23e00778&0&UID4612
+  input-source       DisplayPort-1 (0x0F)

@@ -1,0 +1,25 @@
+Model: 27P2Q
+MCCS version: 2.2
+Commands:
+   Op Code: 01 (VCP Request)
+   Op Code: 02 (VCP Response)
+   Op Code: 03 (VCP Set)
+VCP Features:
+   Feature: 02 (New control value)
+   Feature: 10 (Brightness)
+   Feature: 14 (Select color preset)
+      Values:
+         01: sRGB
+         05: 6500 K
+         06: 7500 K
+   Feature: 60 (Input Source)
+      Values:
+         01: VGA-1
+         03: DVI-1
+         0f: DisplayPort-1
+         11: HDMI-1
+   Feature: 62 (Audio speaker volume)
+   Feature: 86 (Display Scaling)
+      Values:
+         02: Scale to fit
+         05: Fill to screen
