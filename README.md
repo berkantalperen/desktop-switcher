@@ -18,12 +18,15 @@ human has confirmed.
 | Stage | State |
 |---|---|
 | A — Windows discovery and evidence | **done**, see [docs/hardware-inventory.md](docs/hardware-inventory.md) |
-| A — Ubuntu discovery | **outstanding** — run `scripts/ubuntu-preflight.sh` on the Z4 |
+| A — Ubuntu discovery | **done** — the panel is identified by the same serial from both computers |
 | B — hardware verification of input codes | **not started**; no VCP `0x60` write has ever been issued to these monitors |
-| C — Rust workspace, backends, CLI | **done**, 127 tests passing |
+| C — Rust workspace, backends, CLI | **done**, 136 tests passing; both backends validated against real tool output |
 | D — two-monitor switch transaction | **implemented**, exercised against the fake backend; unproven on hardware |
 | E — shortcuts and packaging | documented below, not yet installed |
 | F — keyboard/mouse switching | out of scope for v1 |
+
+Gate A is met: the same physical monitor is identifiable from both computers,
+and each computer can reach it over DDC even while the other one is driving it.
 
 **`switch` will refuse to run until Stage B is complete.** That is deliberate,
 not an unfinished edge: no input code becomes usable until someone has watched

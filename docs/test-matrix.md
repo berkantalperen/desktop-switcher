@@ -53,9 +53,10 @@ available, and you can reach each monitor's on-screen menu by hand.
 | # | Case | Pass condition | Status |
 |---|---|---|---|
 | 1 | Read-only discovery on Windows | Both AOCs identified by distinct serial, internal panel excluded | **passed 2026-09-16** |
-| 2 | Read-only discovery on Ubuntu | Same, from the Z4 | not run |
-| 3 | Serials agree across the two hosts | The same two serials appear on both | not run |
-| 4 | Capabilities on both hosts | Feature `0x60` and its values shown, labelled as claims | Windows **passed**; Ubuntu not run |
+| 2 | Read-only discovery on Ubuntu | The cabled AOC identified, invalid displays flagged | **passed 2026-09-16** |
+| 3 | Serials agree across the two hosts | The same serial identifies the same panel on both | **passed 2026-09-16** — `ASFPA9A001108` from both, and byte-identical capability strings |
+| 4 | Capabilities on both hosts | Feature `0x60` and its values shown, labelled as claims | **passed 2026-09-16** on both |
+| 4b | DDC reachable from the non-displaying computer | The idle computer can still read `0x60` | **passed 2026-09-16** — the Z4 reads `0x11` while Windows drives the panel |
 | 5 | Single monitor, Windows → Ubuntu | The nominated panel shows Ubuntu; recovery works | not run |
 | 6 | Single monitor, Ubuntu → Windows | Mirror of case 5 | not run |
 | 7 | Both monitors, each direction | Both switch; per-monitor result and timing recorded | not run |
