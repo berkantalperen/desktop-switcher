@@ -220,6 +220,8 @@ pub fn detach_is_safe(displays: &[DesktopDisplay], display: &DesktopDisplay) -> 
             "it is the built-in panel, which is kept available as the recovery display".into(),
         );
     }
+    // Checked before the primary rule, because being the only screen is the
+    // more fundamental problem and deserves the clearer message.
     let others = displays
         .iter()
         .filter(|d| d.is_attached && d.gdi_name != display.gdi_name && !d.rect.is_empty())
@@ -227,6 +229,17 @@ pub fn detach_is_safe(displays: &[DesktopDisplay], display: &DesktopDisplay) -> 
     if others == 0 {
         return Err(
             "it is the only attached display, so detaching it would leave no screen at all".into(),
+        );
+    }
+    // Windows rejects this outright, with DISP_CHANGE_BADMODE and no
+    // explanation of its own. Catch it here so the user gets a reason and an
+    // action rather than a return code.
+    if display.is_primary {
+        return Err(
+            "Windows cannot detach the primary display. Make another display primary first \
+             (Settings > System > Display > select a display > \"Make this my main display\"), \
+             then try again"
+                .into(),
         );
     }
     Ok(())
@@ -330,6 +343,17 @@ mod tests {
         let displays = vec![panel.clone(), other];
         let err = detach_is_safe(&displays, &panel).unwrap_err();
         assert!(err.contains("recovery display"), "{err}");
+    }
+
+    #[test]
+    fn detaching_the_primary_display_is_refused_with_an_action() {
+        let primary = display("\\\\.\\DISPLAY5", "p5", rect(0, 0, 1920, 1080), true);
+        let other = display("\\\\.\\DISPLAY1", "p1", rect(1920, 0, 2560, 1600), false);
+        let displays = vec![primary.clone(), other];
+        let err = detach_is_safe(&displays, &primary).unwrap_err();
+        assert!(err.contains("primary"), "{err}");
+        // The message has to say what to do, not just what went wrong.
+        assert!(err.contains("main display"), "{err}");
     }
 
     #[test]

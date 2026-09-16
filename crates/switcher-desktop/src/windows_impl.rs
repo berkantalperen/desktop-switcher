@@ -16,10 +16,13 @@ use windows::Win32::Graphics::Gdi::{
     CDS_UPDATEREGISTRY, DEVMODEW, DISPLAY_DEVICEW, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL,
     DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS,
 };
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
-    IsWindowVisible, SetWindowPos, ShowWindow, GWL_EXSTYLE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+    IsWindowVisible, SetWindowPos, ShowWindow, GWL_EXSTYLE, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
 };
 
 use crate::{
@@ -68,6 +71,21 @@ impl WindowsDesktop {
     }
 }
 
+/// Opt into per-monitor DPI awareness, once per process.
+///
+/// Without this, a scaled display reports different geometry to GDI than to
+/// the window functions — the laptop panel here is 2560x1600 physically but
+/// 1707x1067 virtualised at 150%. Mixing the two coordinate spaces is how a
+/// window gets "moved" to a position that is still on the display it started
+/// on. Failure is ignored: the value cannot be changed once a process has
+/// drawn, and we are no worse off than before.
+fn ensure_dpi_aware() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    });
+}
+
 fn wide_to_string(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..end])
@@ -108,6 +126,24 @@ fn current_mode(gdi_name: &str) -> Option<DEVMODEW> {
     ok.as_bool().then_some(dm)
 }
 
+/// Turn a DISP_CHANGE_* return code into something a human can act on.
+fn disp_change_reason(code: i32) -> &'static str {
+    match code {
+        0 => "successful",
+        1 => "the change needs a restart to take effect",
+        -1 => "the display driver rejected the request (DISP_CHANGE_FAILED)",
+        -2 => {
+            "the mode was rejected (DISP_CHANGE_BADMODE); for a detach this usually means \
+               the display is the primary one, which Windows will not detach"
+        }
+        -3 => "the settings could not be written to the registry (DISP_CHANGE_NOTUPDATED)",
+        -4 => "invalid flags (DISP_CHANGE_BADFLAGS)",
+        -5 => "invalid parameters (DISP_CHANGE_BADPARAM)",
+        -6 => "the change conflicts with a dual-view setup (DISP_CHANGE_BADDUALVIEW)",
+        _ => "an unrecognised status was returned",
+    }
+}
+
 fn apply(gdi_name: &str, dm: &DEVMODEW, operation: &str) -> Result<(), DesktopError> {
     let name = wide_nul(gdi_name);
     // CDS_NORESET stages the change; the second call with a null device name
@@ -124,7 +160,11 @@ fn apply(gdi_name: &str, dm: &DEVMODEW, operation: &str) -> Result<(), DesktopEr
     if staged != DISP_CHANGE_SUCCESSFUL {
         return Err(DesktopError::OsCall {
             operation: format!("{operation} (staging {gdi_name})"),
-            detail: format!("ChangeDisplaySettingsEx returned {}", staged.0),
+            detail: format!(
+                "ChangeDisplaySettingsEx returned {}: {}",
+                staged.0,
+                disp_change_reason(staged.0)
+            ),
         });
     }
 
@@ -133,7 +173,11 @@ fn apply(gdi_name: &str, dm: &DEVMODEW, operation: &str) -> Result<(), DesktopEr
     if committed != DISP_CHANGE_SUCCESSFUL {
         return Err(DesktopError::OsCall {
             operation: format!("{operation} (committing)"),
-            detail: format!("ChangeDisplaySettingsEx returned {}", committed.0),
+            detail: format!(
+                "ChangeDisplaySettingsEx returned {}: {}",
+                committed.0,
+                disp_change_reason(committed.0)
+            ),
         });
     }
     Ok(())
@@ -145,6 +189,7 @@ impl DesktopManager for WindowsDesktop {
     }
 
     fn displays(&self) -> Result<Vec<DesktopDisplay>, DesktopError> {
+        ensure_dpi_aware();
         let mut out = Vec::new();
         let mut index = 0u32;
 
@@ -231,6 +276,7 @@ impl DesktopManager for WindowsDesktop {
     }
 
     fn sweep_windows_off(&self, display: &DesktopDisplay) -> Result<SweepReport, DesktopError> {
+        ensure_dpi_aware();
         let displays = self.displays()?;
         let Some(target) = sweep_target(&displays, display) else {
             return Err(DesktopError::RefusedUnsafe {
@@ -390,7 +436,10 @@ unsafe extern "system" fn sweep_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
         .top
         .saturating_add(offset_y.min((ctx.target.height() - height).max(0)));
 
-    let moved = unsafe {
+    // Synchronous, not SWP_ASYNCWINDOWPOS: the move has to have happened
+    // before the rect is re-read below, and before a maximized window is
+    // re-maximized — otherwise it maximizes on the display it started on.
+    let requested = unsafe {
         SetWindowPos(
             hwnd,
             None,
@@ -398,16 +447,32 @@ unsafe extern "system" fn sweep_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
             new_y,
             0,
             0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
     };
 
-    if moved.is_ok() {
+    // A successful SetWindowPos does not mean the window moved. Windows
+    // belonging to an elevated process, and some that manage their own
+    // placement, silently stay put. Re-read the position and believe that
+    // instead of the return value.
+    let mut after = RECT::default();
+    let landed = requested.is_ok()
+        && unsafe { GetWindowRect(hwnd, &mut after) }.is_ok()
+        && !ctx.source.contains(
+            after.left + (after.right - after.left) / 2,
+            after.top + (after.bottom - after.top) / 2,
+        );
+
+    if landed {
         if was_maximized {
             let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
         }
         ctx.report.moved.push(title);
     } else {
+        // Put a restored-but-unmoved window back the way it was found.
+        if was_maximized {
+            let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
+        }
         ctx.report.skipped.push(title);
     }
     TRUE
