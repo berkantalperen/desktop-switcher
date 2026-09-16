@@ -5,12 +5,15 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 
 use switcher_core::backend::Severity;
-use switcher_core::config::{Config, DestinationMapping, MonitorConfig};
+use switcher_core::config::{
+    AwayAction, Config, DestinationMapping, HomeAction, MonitorConfig, SwitchSideEffects,
+};
 use switcher_core::eventlog;
 use switcher_core::inventory::{self, Binding};
 use switcher_core::switch::{self, ExecOptions, LastRequest, SwitchGuard, SwitchReport};
 use switcher_core::types::{DetectedMonitor, Evidence, InputCode, InputReading};
 
+use crate::desktop;
 use crate::ui;
 use crate::App;
 
@@ -411,8 +414,40 @@ fn matching_destination(binding: &Binding<'_>, code: InputCode) -> Option<String
 // switch / toggle
 // ---------------------------------------------------------------------------
 
-pub fn switch(app: &App, destination: &str, dry_run: bool, force: bool) -> Result<i32> {
+/// Per-invocation overrides for the layer-2 side effects of a switch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SwitchFlags {
+    pub release: bool,
+    pub sweep: bool,
+    pub claim: bool,
+}
+
+impl SwitchFlags {
+    /// Combine configured defaults with what was asked for on this run.
+    fn resolve(self, configured: SwitchSideEffects) -> SwitchSideEffects {
+        let mut effects = configured;
+        if self.sweep {
+            effects.away = AwayAction::Sweep;
+        }
+        if self.release {
+            effects.away = AwayAction::Release;
+        }
+        if self.claim {
+            effects.home = HomeAction::Claim;
+        }
+        effects
+    }
+}
+
+pub fn switch(
+    app: &App,
+    destination: &str,
+    dry_run: bool,
+    force: bool,
+    flags: SwitchFlags,
+) -> Result<i32> {
     let config = require_config(app)?;
+    let effects = flags.resolve(config.on_switch);
 
     if !dry_run && !force {
         let last = LastRequest::load(&app.state_dir);
@@ -466,12 +501,39 @@ pub fn switch(app: &App, destination: &str, dry_run: bool, force: bool) -> Resul
         return Ok(0);
     }
 
+    // Ordering is dictated by the hardware, not by taste.
+    //
+    // A detached display has its output powered down, and a powered-down
+    // output takes the DDC lines with it — we watched exactly that happen on
+    // the Ubuntu side when its screen blanked. So a claim has to come *before*
+    // the write, to bring the link up in time for it, and a release has to
+    // come *after*, or there would be nothing left to write through.
+    //
+    // A sweep does not change the topology, so it goes first, while the
+    // windows being moved are still visible.
+    if !plan.switching_away && effects.home == HomeAction::Claim {
+        for write in &plan.writes {
+            desktop::apply_home(app, &write.handle.backend_id, &write.logical_id);
+        }
+    }
+    if plan.switching_away && effects.away == AwayAction::Sweep {
+        for write in &plan.writes {
+            desktop::apply_away(app, &write.handle.backend_id, &write.logical_id, false);
+        }
+    }
+
     let opts = ExecOptions {
         settle: Duration::from_millis(config.settle_ms),
         read_back: true,
         dry_run: false,
     };
     let report = switch::execute(&plan, app.backend.as_ref(), opts, &app.log);
+
+    if plan.switching_away && effects.away == AwayAction::Release {
+        for write in &plan.writes {
+            desktop::apply_away(app, &write.handle.backend_id, &write.logical_id, true);
+        }
+    }
     if !LastRequest::record(&app.state_dir, destination) {
         ui::warn(format!(
             "could not record this request under {}; the repeat-press guard will not work",
@@ -483,7 +545,7 @@ pub fn switch(app: &App, destination: &str, dry_run: bool, force: bool) -> Resul
     Ok(report.exit_code())
 }
 
-pub fn toggle(app: &App, dry_run: bool) -> Result<i32> {
+pub fn toggle(app: &App, dry_run: bool, flags: SwitchFlags) -> Result<i32> {
     let config = require_config(app)?;
     let detected = app.backend.discover().context("enumerating displays")?;
     let bindings = inventory::bind(config, &detected);
@@ -510,7 +572,7 @@ pub fn toggle(app: &App, dry_run: bool) -> Result<i32> {
     match switch::infer_toggle_target(config, &readings) {
         Ok(target) => {
             println!("Current state is unambiguous; switching to `{target}`.");
-            switch(app, &target, dry_run, false)
+            switch(app, &target, dry_run, false, flags)
         }
         Err(reason) => {
             eprintln!("Refusing to toggle.\n");
@@ -681,6 +743,23 @@ pub fn configure(app: &mut App) -> Result<i32> {
         };
         used_ids.push(logical_id.clone());
 
+        // Carry forward anything already verified for this same panel.
+        // Re-running configure must not throw away a mapping that cost a real
+        // switch and a human watching it happen.
+        let previous = existing.as_ref().and_then(|c| {
+            c.monitors.iter().find(|m| {
+                (m.serial.is_some() && m.serial == identity.serial)
+                    || m.backend_id == identity.backend_id
+            })
+        });
+        let carried = previous.map(|p| p.destinations.clone()).unwrap_or_default();
+        for (destination, mapping) in &carried {
+            println!(
+                "  Keeping already-verified mapping: {destination} -> {} ({})",
+                mapping.input_code, mapping.verification
+            );
+        }
+
         let mut monitor_config = MonitorConfig {
             logical_id: logical_id.clone(),
             name: format!(
@@ -693,7 +772,7 @@ pub fn configure(app: &mut App) -> Result<i32> {
             backend_id: identity.backend_id.clone(),
             serial: identity.serial.clone(),
             model: identity.model.clone(),
-            destinations: Default::default(),
+            destinations: carried,
         };
 
         // One mapping can always be established without writing anything:

@@ -20,6 +20,10 @@ pub fn field_cont(value: impl AsRef<str>) {
     println!("  {:<22} {}", "", value.as_ref());
 }
 
+pub fn bullet(text: impl AsRef<str>) {
+    println!("  - {}", text.as_ref());
+}
+
 pub fn warn(text: impl AsRef<str>) {
     eprintln!("warning: {}", text.as_ref());
 }

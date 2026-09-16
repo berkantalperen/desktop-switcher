@@ -5,6 +5,7 @@
 //! host, so each machine keeps its own file.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,84 @@ pub enum BackendKind {
     DdcutilCli,
     /// In-memory backend, for tests and dry runs only.
     Fake,
+}
+
+// Two independent layers, deliberately not welded together:
+//
+//   Layer 1, the panel's input. Physical, one value, shared by both
+//   computers. This is what `switch` changes over DDC.
+//
+//   Layer 2, desktop attachment. Local to one computer. Both computers can
+//   have the same monitor attached at once -- which is precisely why a window
+//   strands: one computer displays the panel while the other still has it in
+//   its desktop and keeps drawing there.
+//
+// The settings below say what, if anything, layer 1 should do to layer 2.
+// Default is nothing at all, and the `release`/`claim`/`sweep` commands drive
+// layer 2 on their own.
+
+/// What a `switch` should do to this computer's desktop when a monitor is
+/// sent to the other computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AwayAction {
+    /// Leave the desktop completely alone. Switching stays instant and
+    /// nothing rearranges, but windows on that display become unreachable.
+    #[default]
+    Nothing,
+    /// Move windows off the display but leave it attached. Nothing strands,
+    /// and the desktop topology does not change.
+    Sweep,
+    /// Detach the display from this computer's desktop until it comes back.
+    /// The OS relocates the windows itself, at the cost of a reflow each way.
+    Release,
+}
+
+/// What a `switch` should do when a monitor comes back to this computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HomeAction {
+    /// Leave the desktop alone.
+    #[default]
+    Nothing,
+    /// Reattach the display if this computer had released it.
+    Claim,
+}
+
+impl fmt::Display for AwayAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AwayAction::Nothing => "nothing",
+            AwayAction::Sweep => "sweep",
+            AwayAction::Release => "release",
+        })
+    }
+}
+
+impl fmt::Display for HomeAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            HomeAction::Nothing => "nothing",
+            HomeAction::Claim => "claim",
+        })
+    }
+}
+
+/// Layer-2 side effects a bare `switch` should apply. Both default to
+/// nothing, so `switch` only ever changes the input unless asked otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SwitchSideEffects {
+    #[serde(default)]
+    pub away: AwayAction,
+    #[serde(default)]
+    pub home: HomeAction,
+}
+
+impl SwitchSideEffects {
+    /// True when a bare `switch` should touch only the monitor input.
+    pub fn is_input_only(&self) -> bool {
+        self.away == AwayAction::Nothing && self.home == HomeAction::Nothing
+    }
 }
 
 /// One verified mapping: "to put this monitor on that computer, write this code".
@@ -102,6 +181,10 @@ pub struct Config {
     /// Repeat presses of the same shortcut inside this window are ignored.
     #[serde(default = "default_dedupe_ms")]
     pub dedupe_ms: u64,
+    /// Layer-2 side effects a bare `switch` applies. Defaults to none, so
+    /// `switch` only ever changes the monitor input.
+    #[serde(default)]
+    pub on_switch: SwitchSideEffects,
     /// Logical ids in the order writes should be issued. Absent means
     /// declaration order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +218,7 @@ impl Config {
             timeout_seconds: default_timeout_seconds(),
             settle_ms: default_settle_ms(),
             dedupe_ms: default_dedupe_ms(),
+            on_switch: SwitchSideEffects::default(),
             switch_order: None,
             monitors: Vec::new(),
         }
@@ -395,6 +479,70 @@ mod tests {
         let mut c = sample();
         c.switch_order = Some(vec!["middle".into()]);
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn the_default_policy_leaves_the_desktop_completely_alone() {
+        let effects = SwitchSideEffects::default();
+        assert!(effects.is_input_only());
+        assert_eq!(effects.away, AwayAction::Nothing);
+        assert_eq!(effects.home, HomeAction::Nothing);
+    }
+
+    #[test]
+    fn the_two_layers_are_configured_independently() {
+        // Releasing on the way out without claiming on the way back is a
+        // legitimate combination, so neither field may imply the other.
+        let release_only = SwitchSideEffects {
+            away: AwayAction::Release,
+            home: HomeAction::Nothing,
+        };
+        assert!(!release_only.is_input_only());
+
+        let claim_only = SwitchSideEffects {
+            away: AwayAction::Nothing,
+            home: HomeAction::Claim,
+        };
+        assert!(!claim_only.is_input_only());
+    }
+
+    #[test]
+    fn side_effects_round_trip_through_toml() {
+        let mut c = sample();
+        c.on_switch = SwitchSideEffects {
+            away: AwayAction::Release,
+            home: HomeAction::Claim,
+        };
+        let text = toml::to_string_pretty(&c).unwrap();
+        assert!(text.contains("away = \"release\""), "{text}");
+        assert!(text.contains("home = \"claim\""), "{text}");
+        assert_eq!(toml::from_str::<Config>(&text).unwrap(), c);
+    }
+
+    #[test]
+    fn every_away_action_has_a_distinct_name() {
+        for (action, word) in [
+            (AwayAction::Nothing, "nothing"),
+            (AwayAction::Sweep, "sweep"),
+            (AwayAction::Release, "release"),
+        ] {
+            assert_eq!(action.to_string(), word);
+        }
+        assert_eq!(HomeAction::Claim.to_string(), "claim");
+    }
+
+    #[test]
+    fn a_config_without_the_setting_still_loads_and_changes_nothing() {
+        // Files written before this setting existed must keep working, and
+        // must not suddenly start rearranging someone's desktop.
+        let toml_text = r#"
+schema_version = 1
+host = "h"
+backend = "fake"
+self_destination = "windows"
+"#;
+        let config: Config = toml::from_str(toml_text).unwrap();
+        assert!(config.on_switch.is_input_only());
     }
 
     #[test]

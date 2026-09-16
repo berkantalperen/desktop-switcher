@@ -6,6 +6,7 @@
 //! `switch` and `toggle` write only from mappings a human has confirmed.
 
 mod commands;
+mod desktop;
 mod ui;
 
 use std::path::PathBuf;
@@ -85,6 +86,10 @@ enum Command {
     Configure,
 
     /// Switch every configured monitor to a destination, e.g. `windows`.
+    ///
+    /// Changes the monitor input only. To also change what this computer's
+    /// desktop does with the monitor, add --release, --sweep or --claim, or
+    /// set `[on_switch]` in the configuration.
     Switch {
         /// Destination name as configured, e.g. `windows` or `ubuntu`.
         destination: String,
@@ -94,7 +99,34 @@ enum Command {
         /// Ignore the repeat-press guard.
         #[arg(long)]
         force: bool,
+        /// Also detach departing monitors from this computer's desktop.
+        #[arg(long, conflicts_with = "sweep")]
+        release: bool,
+        /// Also move windows off departing monitors, leaving them attached.
+        #[arg(long)]
+        sweep: bool,
+        /// Also reattach monitors this computer had previously released.
+        #[arg(long)]
+        claim: bool,
     },
+
+    /// List displays as this computer's desktop sees them.
+    Displays,
+
+    /// Detach a monitor from this computer's desktop until you claim it back.
+    ///
+    /// Does not touch the monitor input. The other computer keeps displaying
+    /// whatever it was displaying.
+    Release {
+        /// Logical id. Optional when only one monitor is configured.
+        monitor: Option<String>,
+    },
+
+    /// Reattach a monitor this computer had released.
+    Claim { monitor: Option<String> },
+
+    /// Move windows off a monitor without detaching it.
+    Sweep { monitor: Option<String> },
 
     /// Live readings, alongside the last destination this tool requested.
     Status,
@@ -103,6 +135,15 @@ enum Command {
     Toggle {
         #[arg(long)]
         dry_run: bool,
+        /// Also detach departing monitors from this computer's desktop.
+        #[arg(long, conflicts_with = "sweep")]
+        release: bool,
+        /// Also move windows off departing monitors, leaving them attached.
+        #[arg(long)]
+        sweep: bool,
+        /// Also reattach monitors this computer had previously released.
+        #[arg(long)]
+        claim: bool,
     },
 
     /// Write one input code to one monitor, with confirmation. For Stage B
@@ -228,9 +269,39 @@ fn run() -> Result<i32> {
             destination,
             dry_run,
             force,
-        } => commands::switch(&app, &destination, dry_run, force),
+            release,
+            sweep,
+            claim,
+        } => commands::switch(
+            &app,
+            &destination,
+            dry_run,
+            force,
+            commands::SwitchFlags {
+                release,
+                sweep,
+                claim,
+            },
+        ),
+        Command::Displays => desktop::displays(&app),
+        Command::Release { monitor } => desktop::release(&app, monitor.as_deref()),
+        Command::Claim { monitor } => desktop::claim(&app, monitor.as_deref()),
+        Command::Sweep { monitor } => desktop::sweep(&app, monitor.as_deref()),
         Command::Status => commands::status(&app),
-        Command::Toggle { dry_run } => commands::toggle(&app, dry_run),
+        Command::Toggle {
+            dry_run,
+            release,
+            sweep,
+            claim,
+        } => commands::toggle(
+            &app,
+            dry_run,
+            commands::SwitchFlags {
+                release,
+                sweep,
+                claim,
+            },
+        ),
         Command::TestInput {
             monitor,
             code,

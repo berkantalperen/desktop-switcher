@@ -4,6 +4,7 @@ members = [
     "crates/switcher-core",
     "crates/switcher-backend-powertoys",
     "crates/switcher-backend-ddcutil",
+    "crates/switcher-desktop",
     "crates/switcher-cli",
 ]
 
@@ -18,6 +19,7 @@ repository = "https://github.com/berkant/desktop-switcher"
 switcher-core = { path = "crates/switcher-core" }
 switcher-backend-powertoys = { path = "crates/switcher-backend-powertoys" }
 switcher-backend-ddcutil = { path = "crates/switcher-backend-ddcutil" }
+switcher-desktop = { path = "crates/switcher-desktop" }
 
 anyhow = "1.0.99"
 clap = { version = "4.5.48", features = ["derive"] }
