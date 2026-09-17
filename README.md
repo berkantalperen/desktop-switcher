@@ -196,12 +196,18 @@ It will not identify monitors or verify input codes — those need a human
 watching the screens, so they stay in `configure` and `test-input`.
 
 ```powershell
-# Windows: app-control policy blocks running a GUI from WindowsApps, so it
-# goes in Programs and gets a Start Menu entry.
-$dir = "$env:LOCALAPPDATA\Programs\Desktop Switcher"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Copy-Item target\release\desktop-switcher*.exe $dir -Force
+# Installs both binaries, adds a Start Menu entry, and binds your hotkeys.
+.\scripts\install-windows.ps1
 ```
+
+It stops a running GUI first and verifies each copy landed. Windows locks a
+running executable, so copying over one silently fails — which leaves an old
+binary reading the configuration with last week's rules, and is confusing
+enough to be worth a script.
+
+The GUI does not go in `WindowsApps`: an Application Control policy can block
+launching it from there. The CLI is copied there too, since that directory is
+already on `PATH`.
 
 ### Commands
 
