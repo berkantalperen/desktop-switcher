@@ -22,7 +22,7 @@ human has confirmed.
 | B — hardware verification of input codes | **done for the shared monitor** — both codes user-confirmed |
 | C — Rust workspace, backends, CLI | **done** — builds, tests and runs natively on both computers; both backends validated against real tool output |
 | D — switch transaction | **working on hardware** from the Z4, both directions confirmed by read. The Windows side still needs its own `configure`. |
-| E — shortcuts and packaging | documented below, not yet installed |
+| E — shortcuts and packaging | **done on Windows** (Ctrl+Alt+1 / Ctrl+Alt+2); the GNOME installer is written but not yet run on the Z4 |
 | F — keyboard/mouse switching | out of scope for v1 |
 
 Gates A and B are met, and the round trip works: `switch ubuntu` then
@@ -203,15 +203,25 @@ it is not recommended until the current-state logic has been proven on hardware:
 after someone changes an input with the monitor buttons, a toggle has to guess,
 and this one refuses instead.
 
-**Windows** — create a shortcut to the binary with `switch windows` as its
-argument and assign a hotkey in its properties, or use Task Scheduler for a
-global binding. Pin `tool_path` in `config.toml`: a shortcut runs with a
-different environment than a shell, and PowerToys is not on `PATH`.
+Both installers read the destination names out of your configuration rather
+than assuming them, need no elevation, and undo cleanly.
 
-**Ubuntu (GNOME)** — Settings → Keyboard → Keyboard Shortcuts → Custom
-Shortcuts, with the command `/usr/local/bin/desktop-switcher switch ubuntu`.
-This avoids depending on a global-hotkey library, whose behaviour under Wayland
-varies.
+```powershell
+# Windows: Start Menu shortcuts with hotkeys (Ctrl+Alt+1 / Ctrl+Alt+2).
+.\scripts\install-windows-shortcuts.ps1
+.\scripts\install-windows-shortcuts.ps1 -Uninstall
+```
+
+```bash
+# Ubuntu: GNOME custom shortcuts, same bindings.
+./scripts/install-gnome-shortcuts.sh
+./scripts/install-gnome-shortcuts.sh --uninstall
+```
+
+On Windows the hotkey only works while the shortcut lives in the Start Menu or
+on the Desktop, which is why the installer puts it there. On GNOME this uses
+GNOME's own custom-shortcut mechanism rather than a global-hotkey library,
+because under Wayland an application cannot reliably grab keys for itself.
 
 ---
 
