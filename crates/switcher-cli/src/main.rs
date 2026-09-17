@@ -44,6 +44,15 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     tool_path: Option<PathBuf>,
 
+    /// Allow the display-topology commands (`release`, `claim`, `primary`).
+    ///
+    /// They are not reliable yet: on the hardware this was developed against
+    /// they have left displays mirrored instead of extended, and reported a
+    /// detached display as attached. `sweep` solves the stranded-window
+    /// problem without touching topology and needs no flag.
+    #[arg(long, global = true)]
+    experimental: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -172,6 +181,8 @@ pub struct App {
     pub backend_kind: BackendKind,
     pub state_dir: PathBuf,
     pub log: EventLog,
+    /// Whether the unreliable display-topology commands are permitted.
+    pub experimental: bool,
 }
 
 fn default_backend_kind() -> BackendKind {
@@ -261,6 +272,7 @@ fn run() -> Result<i32> {
         backend_kind,
         state_dir,
         log,
+        experimental: cli.experimental,
     };
 
     match cli.command {

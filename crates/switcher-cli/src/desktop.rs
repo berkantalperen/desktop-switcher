@@ -93,7 +93,7 @@ pub fn display_for(manager: &dyn DesktopManager, backend_id: &str) -> Result<Des
     }
     let matches: Vec<&DesktopDisplay> = displays
         .iter()
-        .filter(|d| d.matches_backend_id(backend_id))
+        .filter(|d| d.matches_backend_id(backend_id) || d.gdi_name == backend_id)
         .collect();
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
@@ -108,6 +108,29 @@ pub fn display_for(manager: &dyn DesktopManager, backend_id: &str) -> Result<Des
     }
 }
 
+/// Refuse a topology change unless the user has explicitly opted in.
+///
+/// These three commands are the only ones in the project that have caused
+/// real damage: on the development hardware they have left two monitors
+/// mirrored instead of extended, and reported a detached display as attached
+/// so it could not be reattached. `sweep` covers the problem they were built
+/// for, without touching topology, so the safe default is off.
+fn require_experimental(app: &App, command: &str) -> Result<()> {
+    if app.experimental {
+        return Ok(());
+    }
+    bail!(
+        "`{command}` changes the Windows display topology and is not reliable yet.\n\n\
+         On this hardware it has left monitors mirrored instead of extended, and has \
+         reported a detached display as attached. Recovering needs Settings > System > \
+         Display.\n\n\
+         If you want the stranded-window problem solved, use `desktop-switcher sweep` \
+         instead: it moves windows off a monitor without changing topology and cannot \
+         cost you a screen.\n\n\
+         To run it anyway, pass --experimental."
+    )
+}
+
 /// Resolve a monitor argument to its backend id and a human label.
 fn target_monitor(app: &App, monitor: Option<&str>) -> Result<(String, String)> {
     let config = app
@@ -116,20 +139,14 @@ fn target_monitor(app: &App, monitor: Option<&str>) -> Result<(String, String)> 
         .ok_or_else(|| anyhow!("no configuration yet. Run `desktop-switcher configure` first."))?;
 
     match monitor {
-        Some(name) => {
-            let m = config.monitor(name).ok_or_else(|| {
-                anyhow!(
-                    "`{name}` is not a configured monitor. Configured: {}",
-                    config
-                        .monitors
-                        .iter()
-                        .map(|m| m.logical_id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-            Ok((m.backend_id.clone(), m.logical_id.clone()))
-        }
+        Some(name) => match config.monitor(name) {
+            Some(m) => Ok((m.backend_id.clone(), m.logical_id.clone())),
+            // Not a configured logical id, so take it as a raw selector: a
+            // device path or a GDI name. A display this tool does not manage
+            // can still get stranded by a topology change, and refusing to
+            // name it would leave no way to put it back.
+            None => Ok((name.to_string(), name.to_string())),
+        },
         None => match config.monitors.as_slice() {
             [one] => Ok((one.backend_id.clone(), one.logical_id.clone())),
             [] => bail!("no monitors are configured"),
@@ -189,6 +206,29 @@ pub fn displays(app: &App) -> Result<i32> {
                 ),
             );
         }
+        // Two attached displays sharing an area are mirrored, not extended.
+        // Windows' own Screen API collapses them into one entry, which makes
+        // a mirrored pair look exactly like a missing monitor.
+        let mirrors: Vec<&str> = displays
+            .iter()
+            .filter(|o| {
+                o.is_attached
+                    && d.is_attached
+                    && o.device_path != d.device_path
+                    && o.rect == d.rect
+                    && !o.rect.is_empty()
+            })
+            .map(|o| o.friendly_name.as_deref().unwrap_or(&o.gdi_name))
+            .collect();
+        if !mirrors.is_empty() {
+            ui::field(
+                "mirrored with",
+                format!(
+                    "{} — same area, so they show the same thing",
+                    mirrors.join(", ")
+                ),
+            );
+        }
         if d.is_internal {
             ui::field("protected", "built-in panel; never detached");
         }
@@ -204,6 +244,7 @@ pub fn displays(app: &App) -> Result<i32> {
 /// Part of layer 2 in its own right, and the operation `release` needs first
 /// when the display it is detaching happens to be primary.
 pub fn set_primary(app: &App, monitor: Option<&str>) -> Result<i32> {
+    require_experimental(app, "primary")?;
     let (backend_id, label) = target_monitor(app, monitor)?;
     let detected = app.backend.discover().unwrap_or_default();
     let manager = manager(&detected);
@@ -226,6 +267,7 @@ pub fn set_primary(app: &App, monitor: Option<&str>) -> Result<i32> {
 }
 
 pub fn release(app: &App, monitor: Option<&str>) -> Result<i32> {
+    require_experimental(app, "release")?;
     let (backend_id, label) = target_monitor(app, monitor)?;
     let detected = app.backend.discover().unwrap_or_default();
     let manager = manager(&detected);
@@ -308,6 +350,7 @@ pub fn release(app: &App, monitor: Option<&str>) -> Result<i32> {
 }
 
 pub fn claim(app: &App, monitor: Option<&str>) -> Result<i32> {
+    require_experimental(app, "claim")?;
     let (backend_id, label) = target_monitor(app, monitor)?;
     let detected = app.backend.discover().unwrap_or_default();
     let manager = manager(&detected);
@@ -325,13 +368,23 @@ pub fn claim(app: &App, monitor: Option<&str>) -> Result<i32> {
         .find(|(k, _)| display.matches_backend_id(k))
         .map(|(k, v)| (k.clone(), *v));
 
-    let Some((key, saved)) = saved else {
-        bail!(
-            "`{label}` is detached, but this tool has no saved layout for it, so it \
-             cannot restore the previous resolution and position. Reattach it from \
-             Windows display settings instead."
-        );
-    };
+    // No saved layout is not a reason to refuse. Attaching the display is the
+    // part that matters; Windows will pick a resolution and position, and
+    // having it back in the wrong place beats not having it back.
+    let (key, saved) = saved.unwrap_or_else(|| {
+        println!("No saved layout for `{label}`; Windows will choose its size and position.");
+        (
+            backend_id.clone(),
+            SavedDisplayMode {
+                width: 0,
+                height: 0,
+                pos_x: 0,
+                pos_y: 0,
+                refresh_hz: 0,
+                bits_per_pixel: 0,
+            },
+        )
+    });
 
     manager.attach(&display, saved)?;
     state.released.remove(&key);

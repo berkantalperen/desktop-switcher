@@ -12,10 +12,9 @@ use std::mem::size_of;
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
-    ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsW, CDS_NORESET,
-    CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY, DEVMODEW, DISPLAY_DEVICEW,
-    DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
-    DM_POSITION, ENUM_CURRENT_SETTINGS,
+    ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY,
+    DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT,
+    DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS,
 };
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -26,17 +25,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
 };
 
+use crate::displayconfig;
 use crate::{
     detach_is_safe, sweep_target, DesktopDisplay, DesktopError, DesktopManager, Rect,
     SavedDisplayMode, SweepReport,
 };
-
-// StateFlags bits of DISPLAY_DEVICEW, and the EnumDisplayDevices flag that
-// asks for a device interface path rather than a friendly name.
-const ATTACHED_TO_DESKTOP: u32 = 0x0000_0001;
-const PRIMARY_DEVICE: u32 = 0x0000_0004;
-const MIRRORING_DRIVER: u32 = 0x0000_0008;
-const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 0x0000_0001;
 
 const SW_SHOWMAXIMIZED_FLAG: u32 = 3;
 
@@ -85,11 +78,6 @@ fn ensure_dpi_aware() {
     ONCE.call_once(|| unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     });
-}
-
-fn wide_to_string(buf: &[u16]) -> String {
-    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    String::from_utf16_lossy(&buf[..end])
 }
 
 fn wide_nul(s: &str) -> Vec<u16> {
@@ -208,89 +196,27 @@ impl DesktopManager for WindowsDesktop {
 
     fn displays(&self) -> Result<Vec<DesktopDisplay>, DesktopError> {
         ensure_dpi_aware();
-        let mut out = Vec::new();
-        let mut index = 0u32;
-
-        loop {
-            let mut adapter = DISPLAY_DEVICEW {
-                cb: size_of::<DISPLAY_DEVICEW>() as u32,
-                ..Default::default()
-            };
-            let more =
-                unsafe { EnumDisplayDevicesW(PCWSTR::null(), index, &mut adapter as *mut _, 0) };
-            if !more.as_bool() {
-                break;
-            }
-            index += 1;
-
-            // Mirroring pseudo-devices are not real screens.
-            if adapter.StateFlags.0 & MIRRORING_DRIVER != 0 {
-                continue;
-            }
-
-            let gdi_name = wide_to_string(&adapter.DeviceName);
-            if gdi_name.is_empty() {
-                continue;
-            }
-
-            // The monitor child carries the device interface path, which is
-            // what the monitor backend uses as its stable id.
-            let mut monitor = DISPLAY_DEVICEW {
-                cb: size_of::<DISPLAY_DEVICEW>() as u32,
-                ..Default::default()
-            };
-            let has_monitor = unsafe {
-                EnumDisplayDevicesW(
-                    PCWSTR(adapter.DeviceName.as_ptr()),
-                    0,
-                    &mut monitor as *mut _,
-                    EDD_GET_DEVICE_INTERFACE_NAME,
-                )
-            }
-            .as_bool();
-
-            let device_path = if has_monitor {
-                wide_to_string(&monitor.DeviceID)
-            } else {
-                String::new()
-            };
-
-            // A GPU output with nothing plugged in still enumerates as an
-            // adapter. It has no monitor child and is not on the desktop, so
-            // it is not a display anyone can mean.
-            if device_path.is_empty() && adapter.StateFlags.0 & ATTACHED_TO_DESKTOP == 0 {
-                continue;
-            }
-            let friendly_name = has_monitor
-                .then(|| wide_to_string(&monitor.DeviceString))
-                .filter(|s| !s.is_empty());
-
-            let rect = current_mode(&gdi_name)
-                .map(|dm| {
-                    let pos = unsafe { dm.Anonymous1.Anonymous2.dmPosition };
-                    Rect {
-                        left: pos.x,
-                        top: pos.y,
-                        right: pos.x + dm.dmPelsWidth as i32,
-                        bottom: pos.y + dm.dmPelsHeight as i32,
-                    }
-                })
-                .unwrap_or_default();
-
-            let mut display = DesktopDisplay {
-                gdi_name,
-                device_path,
-                friendly_name,
-                rect,
-                is_primary: adapter.StateFlags.0 & PRIMARY_DEVICE != 0,
-                is_attached: adapter.StateFlags.0 & ATTACHED_TO_DESKTOP != 0,
-                is_internal: false,
-            };
-            display.is_internal = self.is_protected(&display);
-            out.push(display);
-        }
-
-        Ok(out)
+        Ok(displayconfig::enumerate()?
+            .into_iter()
+            .map(|raw| {
+                let mut display = DesktopDisplay {
+                    rect: Rect {
+                        left: raw.position.0,
+                        top: raw.position.1,
+                        right: raw.position.0 + raw.size.0 as i32,
+                        bottom: raw.position.1 + raw.size.1 as i32,
+                    },
+                    is_primary: raw.is_primary(),
+                    is_attached: raw.is_attached,
+                    gdi_name: raw.gdi_name,
+                    device_path: raw.device_path,
+                    friendly_name: raw.friendly_name,
+                    is_internal: false,
+                };
+                display.is_internal = self.is_protected(&display);
+                display
+            })
+            .collect())
     }
 
     fn sweep_windows_off(&self, display: &DesktopDisplay) -> Result<SweepReport, DesktopError> {
@@ -321,56 +247,19 @@ impl DesktopManager for WindowsDesktop {
 
     fn set_primary(&self, display: &DesktopDisplay) -> Result<(), DesktopError> {
         ensure_dpi_aware();
-        let displays = self.displays()?;
-        let target = displays
-            .iter()
-            .find(|d| d.gdi_name == display.gdi_name)
-            .ok_or_else(|| DesktopError::DisplayNotFound(display.gdi_name.clone()))?;
-
-        if target.is_primary {
+        if display.is_primary {
             return Ok(());
         }
-        if !target.is_attached {
+        if !display.is_attached {
             return Err(DesktopError::RefusedUnsafe {
-                display: target.gdi_name.clone(),
+                display: display.gdi_name.clone(),
                 reason: "it is not attached, so it cannot be made primary".into(),
             });
         }
-
-        // The primary display must sit at the origin, so promoting one means
-        // shifting every other display by the same amount. All of it is
-        // staged and committed together; a partial arrangement is rejected.
-        let dx = -target.rect.left;
-        let dy = -target.rect.top;
-        let operation = format!("making {} primary", target.gdi_name);
-
-        // The new primary must be staged first. Staging another display
-        // before it makes the driver reject the batch with
-        // DISP_CHANGE_FAILED, because the origin it is being positioned
-        // against has not moved yet.
-        let ordered = std::iter::once(target).chain(
-            displays
-                .iter()
-                .filter(|d| d.gdi_name != target.gdi_name && d.is_attached && !d.rect.is_empty()),
-        );
-
-        for d in ordered {
-            let Some(mut dm) = current_mode(&d.gdi_name) else {
-                continue;
-            };
-            dm.dmFields = DM_POSITION;
-            dm.Anonymous1.Anonymous2.dmPosition.x = d.rect.left + dx;
-            dm.Anonymous1.Anonymous2.dmPosition.y = d.rect.top + dy;
-
-            let extra = if d.gdi_name == target.gdi_name {
-                CDS_SET_PRIMARY
-            } else {
-                CDS_TYPE(0)
-            };
-            stage(&d.gdi_name, &dm, extra, &operation)?;
+        if display.device_path.is_empty() {
+            return Err(DesktopError::DisplayNotFound(display.gdi_name.clone()));
         }
-
-        commit(&operation)
+        displayconfig::make_primary(&display.device_path)
     }
 
     fn detach(&self, display: &DesktopDisplay) -> Result<SavedDisplayMode, DesktopError> {
@@ -402,24 +291,15 @@ impl DesktopManager for WindowsDesktop {
             bits_per_pixel: dm.dmBitsPerPel,
         };
 
-        // Detaching means handing back a mode whose size fields are zero.
-        //
-        // A wholly zeroed DEVMODE is the recipe usually quoted, and this
-        // driver rejects it with DISP_CHANGE_BADMODE. Starting from the live
-        // mode keeps dmSize, dmDriverExtra and the device name consistent
-        // with what the driver expects, and only blanks the fields that say
-        // "no longer part of the desktop".
-        let mut detached = current_mode(&display.gdi_name).unwrap_or_else(blank_devmode);
-        detached.dmPelsWidth = 0;
-        detached.dmPelsHeight = 0;
-        detached.dmBitsPerPel = 0;
-        detached.dmDisplayFrequency = 0;
-        detached.Anonymous1.Anonymous2.dmPosition.x = 0;
-        detached.Anonymous1.Anonymous2.dmPosition.y = 0;
-        detached.dmFields =
-            DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
-
-        apply(&display.gdi_name, &detached, "detaching the display")?;
+        // Detaching goes through SetDisplayConfig. The older
+        // ChangeDisplaySettingsEx recipe -- hand back a DEVMODE whose size
+        // fields are zero -- is rejected by this driver with
+        // DISP_CHANGE_BADMODE, in both the fully-zeroed and
+        // derived-from-live-mode variants.
+        if display.device_path.is_empty() {
+            return Err(DesktopError::DisplayNotFound(display.gdi_name.clone()));
+        }
+        displayconfig::set_active(&display.device_path, false)?;
 
         Ok(saved)
     }
@@ -429,10 +309,20 @@ impl DesktopManager for WindowsDesktop {
         display: &DesktopDisplay,
         saved: SavedDisplayMode,
     ) -> Result<(), DesktopError> {
-        if saved.width == 0 || saved.height == 0 {
-            return Err(DesktopError::NoSavedLayout(display.gdi_name.clone()));
+        if display.device_path.is_empty() {
+            return Err(DesktopError::DisplayNotFound(display.gdi_name.clone()));
         }
-        let mut dm = blank_devmode();
+
+        // Bring it back into the desktop first; Windows picks a mode for it.
+        displayconfig::set_active(&display.device_path, true)?;
+
+        // Then put it back where it was. This is a best effort: the display
+        // is usable either way, and refusing to report success because it
+        // landed a few hundred pixels off would be worse than saying so.
+        if saved.width == 0 || saved.height == 0 {
+            return Ok(());
+        }
+        let mut dm = current_mode(&display.gdi_name).unwrap_or_else(blank_devmode);
         dm.dmFields =
             DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
         dm.dmPelsWidth = saved.width;
@@ -442,7 +332,13 @@ impl DesktopManager for WindowsDesktop {
         dm.Anonymous1.Anonymous2.dmPosition.x = saved.pos_x;
         dm.Anonymous1.Anonymous2.dmPosition.y = saved.pos_y;
 
-        apply(&display.gdi_name, &dm, "reattaching the display")
+        if let Err(e) = apply(&display.gdi_name, &dm, "restoring the previous layout") {
+            eprintln!(
+                "warning: `{}` is attached again but could not be put back at {}x{} ({}, {}): {e}",
+                display.gdi_name, saved.width, saved.height, saved.pos_x, saved.pos_y
+            );
+        }
+        Ok(())
     }
 }
 

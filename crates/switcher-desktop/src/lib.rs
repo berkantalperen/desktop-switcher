@@ -21,6 +21,8 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
+mod displayconfig;
+#[cfg(windows)]
 mod windows_impl;
 
 #[cfg(windows)]

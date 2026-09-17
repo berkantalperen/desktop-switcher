@@ -447,7 +447,23 @@ pub fn switch(
     flags: SwitchFlags,
 ) -> Result<i32> {
     let config = require_config(app)?;
-    let effects = flags.resolve(config.on_switch);
+    let mut effects = flags.resolve(config.on_switch);
+
+    // The topology actions are gated the same way the standalone commands
+    // are; a switch is not a way around that.
+    if !app.experimental {
+        if effects.away == AwayAction::Release {
+            ui::warn(
+                "ignoring --release: changing display topology is not reliable yet. \
+                 Use --sweep, or pass --experimental.",
+            );
+            effects.away = AwayAction::Nothing;
+        }
+        if effects.home == HomeAction::Claim {
+            ui::warn("ignoring --claim: pass --experimental to allow topology changes.");
+            effects.home = HomeAction::Nothing;
+        }
+    }
 
     if !dry_run && !force {
         let last = LastRequest::load(&app.state_dir);
