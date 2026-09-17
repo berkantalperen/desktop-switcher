@@ -1,28 +1,39 @@
 //! User-defined actions: a name, a sequence of steps, and an optional hotkey.
 //!
 //! The two layers stay separate everywhere else in this project, which is
-//! right for correctness but tedious in daily use: "put everything on Ubuntu"
-//! is one intention and two or three commands. An action is where a person
-//! composes those into the thing they actually mean, names it, and binds a
-//! key to it.
+//! right for correctness but tedious in daily use: "everything to the desk
+//! machine" is one intention and several commands. An action is where a
+//! person composes those into the thing they actually mean, names it in their
+//! own words, and binds a key to it.
 //!
 //! Steps run in order and the outcome of each is reported. A failing step
 //! stops the rest by default, because the later steps usually assume the
 //! earlier ones happened — sweeping a monitor is pointless if the switch that
-//! was meant to send it away never occurred.
+//! was meant to free it never occurred.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::InputCode;
+
 /// One thing an action does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ActionStep {
-    /// Point every configured monitor at a destination (layer 1).
-    Switch { destination: String },
-    /// Move windows off a monitor without detaching it (layer 2).
+    /// Set one monitor to one of its inputs.
+    ///
+    /// The unit of work is a single monitor, because that is the only thing
+    /// the hardware actually offers. "Everything to the desktop" is a person's
+    /// idea, and it is expressed by putting several of these in one action.
+    SetInput { monitor: String, code: InputCode },
+    /// Move windows off a monitor without detaching it.
     Sweep {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monitor: Option<String>,
+    },
+    /// Put swept windows back where they were.
+    RestoreWindows {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monitor: Option<String>,
     },
@@ -59,11 +70,30 @@ impl ActionStep {
         )
     }
 
+    /// The monitor this step names, if it names one.
+    ///
+    /// Used to check an action against the configured monitors before it is
+    /// saved, rather than when a hotkey is pressed.
+    pub fn monitor_name(&self) -> Option<&str> {
+        match self {
+            ActionStep::SetInput { monitor, .. } => Some(monitor),
+            ActionStep::Sweep { monitor }
+            | ActionStep::RestoreWindows { monitor }
+            | ActionStep::Release { monitor }
+            | ActionStep::Claim { monitor }
+            | ActionStep::Primary { monitor } => monitor.as_deref(),
+            ActionStep::Run { .. } => None,
+        }
+    }
+
     pub fn summary(&self) -> String {
         let target = |m: &Option<String>| m.clone().unwrap_or_else(|| "the only monitor".into());
         match self {
-            ActionStep::Switch { destination } => format!("switch to {destination}"),
+            ActionStep::SetInput { monitor, code } => format!("set {monitor} to {code}"),
             ActionStep::Sweep { monitor } => format!("sweep windows off {}", target(monitor)),
+            ActionStep::RestoreWindows { monitor } => {
+                format!("restore windows onto {}", target(monitor))
+            }
             ActionStep::Release { monitor } => format!("release {}", target(monitor)),
             ActionStep::Claim { monitor } => format!("claim {}", target(monitor)),
             ActionStep::Primary { monitor } => format!("make {} primary", target(monitor)),
@@ -144,10 +174,10 @@ impl Action {
             ));
         }
         for step in &self.steps {
-            if let ActionStep::Switch { destination } = step {
-                if destination.trim().is_empty() {
+            if let ActionStep::SetInput { monitor, .. } = step {
+                if monitor.trim().is_empty() {
                     return Err(format!(
-                        "`{}` has a switch step with no destination",
+                        "`{}` has a set-input step with no monitor",
                         self.name
                     ));
                 }
@@ -212,9 +242,10 @@ pub fn normalise_hotkey(hotkey: &str) -> String {
 mod tests {
     use super::*;
 
-    fn switch_to(destination: &str) -> ActionStep {
-        ActionStep::Switch {
-            destination: destination.into(),
+    fn set_input(monitor: &str, code: &str) -> ActionStep {
+        ActionStep::SetInput {
+            monitor: monitor.into(),
+            code: code.parse().unwrap(),
         }
     }
 
@@ -222,7 +253,7 @@ mod tests {
         Action {
             name: name.into(),
             hotkey: hotkey.map(String::from),
-            steps: vec![switch_to("ubuntu")],
+            steps: vec![set_input("SN-1", "0x11")],
         }
     }
 
@@ -237,10 +268,10 @@ mod tests {
     fn steps_round_trip_through_toml() {
         let wrapper = Wrapper {
             actions: vec![Action {
-                name: "Work on Ubuntu".into(),
+                name: "Desk setup".into(),
                 hotkey: Some("CTRL+ALT+2".into()),
                 steps: vec![
-                    switch_to("ubuntu"),
+                    set_input("SN-1", "0x11"),
                     ActionStep::Sweep {
                         monitor: Some("main".into()),
                     },
@@ -252,7 +283,7 @@ mod tests {
             }],
         };
         let text = toml::to_string_pretty(&wrapper).unwrap();
-        assert!(text.contains("kind = \"switch\""), "{text}");
+        assert!(text.contains("kind = \"set-input\""), "{text}");
         assert_eq!(toml::from_str::<Wrapper>(&text).unwrap(), wrapper);
     }
 
@@ -268,7 +299,7 @@ mod tests {
         let a = Action {
             name: "Broken".into(),
             hotkey: None,
-            steps: vec![switch_to("  ")],
+            steps: vec![set_input("  ", "0x11")],
         };
         assert!(a.validate().is_err());
     }
@@ -301,14 +332,14 @@ mod tests {
     #[test]
     fn names_that_collapse_to_the_same_slug_are_rejected() {
         // Both would want the same shortcut filename.
-        let actions = vec![action("Go Ubuntu", None), action("go/ubuntu!", None)];
+        let actions = vec![action("Go Desk", None), action("go/desk!", None)];
         assert!(validate_all(&actions).unwrap_err().contains("short name"));
     }
 
     #[test]
     fn slugs_are_safe_and_never_empty() {
-        assert_eq!(Action::new("Work on Ubuntu").slug(), "work-on-ubuntu");
-        assert_eq!(Action::new("  Ubuntu!!  ").slug(), "ubuntu");
+        assert_eq!(Action::new("Desk setup").slug(), "desk-setup");
+        assert_eq!(Action::new("  Desk!!  ").slug(), "desk");
         assert_eq!(Action::new("///").slug(), "action");
         assert_eq!(Action::new("Türkçe ada").slug(), "t-rk-e-ada");
     }
@@ -318,21 +349,27 @@ mod tests {
         let safe = Action {
             name: "Safe".into(),
             hotkey: None,
-            steps: vec![switch_to("ubuntu"), ActionStep::Sweep { monitor: None }],
+            steps: vec![
+                set_input("SN-1", "0x11"),
+                ActionStep::Sweep { monitor: None },
+            ],
         };
         assert!(!safe.needs_experimental());
 
         let risky = Action {
             name: "Risky".into(),
             hotkey: None,
-            steps: vec![switch_to("ubuntu"), ActionStep::Release { monitor: None }],
+            steps: vec![
+                set_input("SN-1", "0x11"),
+                ActionStep::Release { monitor: None },
+            ],
         };
         assert!(risky.needs_experimental());
     }
 
     #[test]
     fn steps_describe_themselves_readably() {
-        assert_eq!(switch_to("ubuntu").summary(), "switch to ubuntu");
+        assert_eq!(set_input("SN-1", "0x11").summary(), "set SN-1 to 0x11");
         assert_eq!(
             ActionStep::Sweep {
                 monitor: Some("main".into())

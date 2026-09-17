@@ -1,8 +1,17 @@
 //! Host-local configuration.
 //!
-//! Configuration is deliberately *not* portable between the two computers.
-//! Backend ids, ports and even which input code means "Windows" differ per
-//! host, so each machine keeps its own file.
+//! The model is deliberately narrow: **monitors and their inputs**. Nothing
+//! here knows what is plugged into an input, and nothing should. A monitor
+//! input is a fact about the panel; "that one is the laptop" is a fact about
+//! one person's desk, and the place to record it is the *name they give an
+//! action*, not the vocabulary of the tool.
+//!
+//! That keeps the tool usable on any machine with any number of computers
+//! attached, and means a rearranged desk is a rename rather than a
+//! reinstall.
+//!
+//! Configuration is not portable between computers: backend ids and the
+//! physical wiring differ per host, so each machine keeps its own file.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -10,9 +19,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::actions::{Action, ActionStep};
 use crate::types::{Evidence, InputCode};
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// Schema 2 dropped the idea of a "destination computer"; see the module note.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -43,159 +54,113 @@ pub enum BackendKind {
     Fake,
 }
 
-// Two independent layers, deliberately not welded together:
-//
-//   Layer 1, the panel's input. Physical, one value, shared by both
-//   computers. This is what `switch` changes over DDC.
-//
-//   Layer 2, desktop attachment. Local to one computer. Both computers can
-//   have the same monitor attached at once -- which is precisely why a window
-//   strands: one computer displays the panel while the other still has it in
-//   its desktop and keeps drawing there.
-//
-// The settings below say what, if anything, layer 1 should do to layer 2.
-// Default is nothing at all, and the `release`/`claim`/`sweep` commands drive
-// layer 2 on their own.
-
-/// What a `switch` should do to this computer's desktop when a monitor is
-/// sent to the other computer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum AwayAction {
-    /// Leave the desktop completely alone. Switching stays instant and
-    /// nothing rearranges, but windows on that display become unreachable.
-    #[default]
-    Nothing,
-    /// Move windows off the display but leave it attached. Nothing strands,
-    /// and the desktop topology does not change.
-    Sweep,
-    /// Detach the display from this computer's desktop until it comes back.
-    /// The OS relocates the windows itself, at the cost of a reflow each way.
-    Release,
-}
-
-/// What a `switch` should do when a monitor comes back to this computer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum HomeAction {
-    /// Leave the desktop alone.
-    #[default]
-    Nothing,
-    /// Reattach the display if this computer had released it.
-    Claim,
-}
-
-impl fmt::Display for AwayAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            AwayAction::Nothing => "nothing",
-            AwayAction::Sweep => "sweep",
-            AwayAction::Release => "release",
-        })
-    }
-}
-
-impl fmt::Display for HomeAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            HomeAction::Nothing => "nothing",
-            HomeAction::Claim => "claim",
-        })
-    }
-}
-
-/// Layer-2 side effects a bare `switch` should apply. Both default to
-/// nothing, so `switch` only ever changes the input unless asked otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SwitchSideEffects {
-    #[serde(default)]
-    pub away: AwayAction,
-    #[serde(default)]
-    pub home: HomeAction,
-}
-
-impl SwitchSideEffects {
-    /// True when a bare `switch` should touch only the monitor input.
-    pub fn is_input_only(&self) -> bool {
-        self.away == AwayAction::Nothing && self.home == HomeAction::Nothing
-    }
-}
-
-/// One verified mapping: "to put this monitor on that computer, write this code".
+/// One input on one monitor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DestinationMapping {
+pub struct MonitorInput {
     pub input_code: InputCode,
-    /// How this code was established. Only `user-confirmed` permits switching.
+    /// What to call it. Defaults to the monitor's own name for the input
+    /// (`HDMI-1`), but this is the natural place for "Laptop" or "Desktop" —
+    /// a label chosen by the person, not a concept the tool understands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// How well this input is known to work. `reported` means the monitor
+    /// listed it; only a real switch that someone watched makes it
+    /// `user-confirmed`.
     #[serde(default)]
     pub verification: Evidence,
-    /// ISO date the confirmation happened, for staleness review.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_on: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
+impl MonitorInput {
+    pub fn reported(code: InputCode, label: Option<String>) -> Self {
+        Self {
+            input_code: code,
+            label,
+            verification: Evidence::Reported,
+            note: None,
+        }
+    }
+
+    /// The name to show, falling back to the MCCS name and then the raw code.
+    pub fn display_name(&self) -> String {
+        match &self.label {
+            Some(l) if !l.trim().is_empty() => l.clone(),
+            _ => self
+                .input_code
+                .standard_label()
+                .map(String::from)
+                .unwrap_or_else(|| self.input_code.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorConfig {
-    /// Stable human name used on the command line, e.g. `left`.
-    pub logical_id: String,
-    pub name: String,
-    /// Backend handle recorded at configure time (a port-scoped identifier).
+    /// Stable identity, used to name this monitor on the command line and in
+    /// actions. The EDID serial when the panel publishes one, because that
+    /// follows the panel rather than the port.
+    pub key: String,
+    /// What to call it, e.g. `AOC 27P2DG5 (left)`. Free text.
+    pub label: String,
+    /// Backend handle recorded at configure time; a port-scoped identifier.
     pub backend_id: String,
-    /// EDID serial recorded at configure time. This tracks the panel itself
-    /// and is what a binding is actually checked against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// destination name -> verified input code.
+    /// The inputs this monitor offers.
     #[serde(default)]
-    pub destinations: BTreeMap<String, DestinationMapping>,
+    pub inputs: Vec<MonitorInput>,
 }
 
 impl MonitorConfig {
-    pub fn mapping(&self, destination: &str) -> Option<&DestinationMapping> {
-        self.destinations.get(destination)
+    pub fn input(&self, code: InputCode) -> Option<&MonitorInput> {
+        self.inputs.iter().find(|i| i.input_code == code)
+    }
+
+    pub fn input_mut(&mut self, code: InputCode) -> Option<&mut MonitorInput> {
+        self.inputs.iter_mut().find(|i| i.input_code == code)
+    }
+
+    /// Match a user-typed name against this monitor's key, label or serial.
+    pub fn matches(&self, name: &str) -> bool {
+        let name = name.trim();
+        self.key.eq_ignore_ascii_case(name)
+            || self.label.eq_ignore_ascii_case(name)
+            || self
+                .serial
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(name))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub schema_version: u32,
-    /// Free-form name for this computer, e.g. `alienware-windows`.
+    /// This machine's name. Display only; filled from the system hostname.
     pub host: String,
     pub backend: BackendKind,
-    /// The destination name that refers to *this* computer. Used to decide
-    /// whether a failed read-back is expected (we just switched away) or a
-    /// real fault.
-    pub self_destination: String,
     /// Explicit path to the backend executable. Discovery is attempted when
-    /// this is absent, but a pinned path is preferred for shortcuts.
+    /// absent, but a pinned path is preferred for shortcuts, which run with a
+    /// different environment than a shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_path: Option<PathBuf>,
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
-    /// Pause after each write before attempting a read-back.
+    /// Pause after a write before attempting a read-back.
     #[serde(default = "default_settle_ms")]
     pub settle_ms: u64,
-    /// Repeat presses of the same shortcut inside this window are ignored.
+    /// Repeats of the same request inside this window are ignored, so a held
+    /// shortcut key does not issue a burst of writes.
     #[serde(default = "default_dedupe_ms")]
     pub dedupe_ms: u64,
-    /// Layer-2 side effects a bare `switch` applies. Defaults to none, so
-    /// `switch` only ever changes the monitor input.
-    #[serde(default)]
-    pub on_switch: SwitchSideEffects,
-    /// Logical ids in the order writes should be issued. Absent means
-    /// declaration order.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub switch_order: Option<Vec<String>>,
     #[serde(default)]
     pub monitors: Vec<MonitorConfig>,
-    /// Named sequences of steps the user composed, each optionally bound to a
-    /// hotkey. This is what the GUI edits and what the shortcut installers
-    /// bind.
+    /// Named sequences of steps, each optionally bound to a hotkey. This is
+    /// where a person records what a combination of inputs *means* to them.
     #[serde(default)]
-    pub actions: Vec<crate::actions::Action>,
+    pub actions: Vec<Action>,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -209,68 +174,33 @@ fn default_dedupe_ms() -> u64 {
 }
 
 impl Config {
-    pub fn new(
-        host: impl Into<String>,
-        backend: BackendKind,
-        self_destination: impl Into<String>,
-    ) -> Self {
+    pub fn new(host: impl Into<String>, backend: BackendKind) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             host: host.into(),
             backend,
-            self_destination: self_destination.into(),
             tool_path: None,
             timeout_seconds: default_timeout_seconds(),
             settle_ms: default_settle_ms(),
             dedupe_ms: default_dedupe_ms(),
-            on_switch: SwitchSideEffects::default(),
-            switch_order: None,
             monitors: Vec::new(),
             actions: Vec::new(),
         }
     }
 
-    pub fn monitor(&self, logical_id: &str) -> Option<&MonitorConfig> {
-        self.monitors.iter().find(|m| m.logical_id == logical_id)
+    /// Find a monitor by key, label or serial.
+    pub fn monitor(&self, name: &str) -> Option<&MonitorConfig> {
+        self.monitors.iter().find(|m| m.matches(name))
     }
 
-    pub fn monitor_mut(&mut self, logical_id: &str) -> Option<&mut MonitorConfig> {
-        self.monitors
-            .iter_mut()
-            .find(|m| m.logical_id == logical_id)
+    pub fn monitor_mut(&mut self, name: &str) -> Option<&mut MonitorConfig> {
+        self.monitors.iter_mut().find(|m| m.matches(name))
     }
 
-    /// Every destination named by any monitor, sorted.
-    pub fn destinations(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .monitors
+    pub fn action(&self, name: &str) -> Option<&Action> {
+        self.actions
             .iter()
-            .flat_map(|m| m.destinations.keys().cloned())
-            .collect();
-        out.sort();
-        out.dedup();
-        out
-    }
-
-    /// Monitors in the order writes should be issued.
-    pub fn ordered_monitors(&self) -> Vec<&MonitorConfig> {
-        match &self.switch_order {
-            None => self.monitors.iter().collect(),
-            Some(order) => {
-                let mut out: Vec<&MonitorConfig> = Vec::new();
-                for id in order {
-                    if let Some(m) = self.monitor(id) {
-                        out.push(m);
-                    }
-                }
-                for m in &self.monitors {
-                    if !out.iter().any(|x| x.logical_id == m.logical_id) {
-                        out.push(m);
-                    }
-                }
-                out
-            }
-        }
+            .find(|a| a.name.eq_ignore_ascii_case(name.trim()))
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -280,60 +210,56 @@ impl Config {
                 self.schema_version
             )));
         }
-        if self.host.trim().is_empty() {
-            return Err(ConfigError::Invalid("host must not be empty".into()));
-        }
-        if self.self_destination.trim().is_empty() {
-            return Err(ConfigError::Invalid(
-                "self_destination must name the destination that means this computer".into(),
-            ));
+
+        let mut seen_keys: BTreeMap<String, ()> = BTreeMap::new();
+        let mut seen_backend: BTreeMap<&String, ()> = BTreeMap::new();
+        for monitor in &self.monitors {
+            if monitor.key.trim().is_empty() {
+                return Err(ConfigError::Invalid("a monitor has no key".into()));
+            }
+            if seen_keys
+                .insert(monitor.key.to_ascii_lowercase(), ())
+                .is_some()
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "two monitors share the key `{}`",
+                    monitor.key
+                )));
+            }
+            if seen_backend.insert(&monitor.backend_id, ()).is_some() {
+                return Err(ConfigError::Invalid(format!(
+                    "two monitors share the connection `{}`; re-run `configure`",
+                    monitor.backend_id
+                )));
+            }
+            let mut codes = Vec::new();
+            for input in &monitor.inputs {
+                if codes.contains(&input.input_code) {
+                    return Err(ConfigError::Invalid(format!(
+                        "`{}` lists input {} twice",
+                        monitor.label, input.input_code
+                    )));
+                }
+                codes.push(input.input_code);
+            }
         }
 
-        let mut seen_logical = BTreeMap::new();
-        let mut seen_backend = BTreeMap::new();
-        for m in &self.monitors {
-            if m.logical_id.trim().is_empty() {
-                return Err(ConfigError::Invalid("logical_id must not be empty".into()));
-            }
-            if seen_logical.insert(&m.logical_id, ()).is_some() {
-                return Err(ConfigError::Invalid(format!(
-                    "duplicate logical_id `{}`",
-                    m.logical_id
-                )));
-            }
-            if seen_backend.insert(&m.backend_id, ()).is_some() {
-                return Err(ConfigError::Invalid(format!(
-                    "two monitors share backend_id `{}`; re-run `configure`",
-                    m.backend_id
-                )));
-            }
-        }
-
-        // Two entries claiming the same panel would make every binding ambiguous.
-        let serials: Vec<&String> = self
-            .monitors
-            .iter()
-            .filter_map(|m| m.serial.as_ref())
-            .collect();
-        for (i, a) in serials.iter().enumerate() {
-            if serials[i + 1..].contains(a) {
-                return Err(ConfigError::Invalid(format!(
-                    "two monitors are configured with the same serial `{a}`; re-run `configure`"
-                )));
+        // An action naming a monitor that no longer exists would fail at the
+        // worst moment — when a hotkey is pressed — so catch it on save.
+        for action in &self.actions {
+            for step in &action.steps {
+                if let Some(name) = step.monitor_name() {
+                    if !name.is_empty() && self.monitor(name).is_none() {
+                        return Err(ConfigError::Invalid(format!(
+                            "action `{}` refers to monitor `{name}`, which is not configured",
+                            action.name
+                        )));
+                    }
+                }
             }
         }
 
         crate::actions::validate_all(&self.actions).map_err(ConfigError::Invalid)?;
-
-        if let Some(order) = &self.switch_order {
-            for id in order {
-                if self.monitor(id).is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "switch_order names unknown monitor `{id}`"
-                    )));
-                }
-            }
-        }
         Ok(())
     }
 
@@ -345,12 +271,26 @@ impl Config {
             path: path.to_path_buf(),
             detail: e.to_string(),
         })?;
-        let config: Config = toml::from_str(&text).map_err(|e| ConfigError::Parse {
+        let config = Self::from_toml(&text).map_err(|detail| ConfigError::Parse {
             path: path.to_path_buf(),
-            detail: e.to_string(),
+            detail,
         })?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Parse, upgrading an older schema on the way through.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let value: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+        let version = value
+            .get("schema_version")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(SCHEMA_VERSION as i64);
+
+        if version == 1 {
+            return migrate_v1(&value);
+        }
+        value.try_into::<Config>().map_err(|e| e.to_string())
     }
 
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
@@ -363,7 +303,7 @@ impl Config {
         }
         let text =
             toml::to_string_pretty(self).map_err(|e| ConfigError::Serialise(e.to_string()))?;
-        // Write-then-rename so an interrupted save cannot truncate a working
+        // Write-then-rename, so an interrupted save cannot truncate a working
         // configuration into an unusable one.
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text).map_err(|e| ConfigError::Write {
@@ -376,6 +316,151 @@ impl Config {
         })?;
         Ok(())
     }
+}
+
+/// Upgrade a schema-1 file, which was organised around "destination
+/// computers".
+///
+/// Each destination becomes an *action* of the same name. That is the whole
+/// conceptual shift made concrete: the tool stops believing in computers, and
+/// what used to be built-in vocabulary becomes a label the user owns and can
+/// rename or delete.
+fn migrate_v1(value: &toml::Value) -> Result<Config, String> {
+    let host = value
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("this-computer")
+        .to_string();
+    let backend = value
+        .get("backend")
+        .cloned()
+        .map(|b| b.try_into::<BackendKind>())
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(BackendKind::Fake);
+
+    let mut config = Config::new(host, backend);
+    for key in ["timeout_seconds", "settle_ms", "dedupe_ms"] {
+        if let Some(n) = value.get(key).and_then(|v| v.as_integer()) {
+            match key {
+                "timeout_seconds" => config.timeout_seconds = n as u64,
+                "settle_ms" => config.settle_ms = n as u64,
+                _ => config.dedupe_ms = n as u64,
+            }
+        }
+    }
+    if let Some(p) = value.get("tool_path").and_then(|v| v.as_str()) {
+        config.tool_path = Some(PathBuf::from(p));
+    }
+
+    // destination name -> steps, so the old groupings survive as actions.
+    let mut grouped: BTreeMap<String, Vec<ActionStep>> = BTreeMap::new();
+
+    let monitors = value
+        .get("monitors")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for raw in monitors {
+        let logical_id = raw
+            .get("logical_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("monitor");
+        let serial = raw
+            .get("serial")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let backend_id = raw
+            .get("backend_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let model = raw
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let name = raw
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(logical_id);
+
+        // Prefer the serial as the key, since it follows the panel.
+        let key = serial.clone().unwrap_or_else(|| backend_id.clone());
+
+        let mut inputs = Vec::new();
+        if let Some(destinations) = raw.get("destinations").and_then(|v| v.as_table()) {
+            for (destination, mapping) in destinations {
+                let Some(code) = mapping
+                    .get("input_code")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<InputCode>().ok())
+                else {
+                    continue;
+                };
+                let verification = mapping
+                    .get("verification")
+                    .cloned()
+                    .and_then(|v| v.try_into::<Evidence>().ok())
+                    .unwrap_or_default();
+
+                inputs.push(MonitorInput {
+                    input_code: code,
+                    // The old destination name becomes the input's label:
+                    // still the user's word, no longer the tool's concept.
+                    label: Some(destination.clone()),
+                    verification,
+                    note: mapping
+                        .get("note")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                });
+
+                grouped
+                    .entry(destination.clone())
+                    .or_default()
+                    .push(ActionStep::SetInput {
+                        monitor: key.clone(),
+                        code,
+                    });
+            }
+        }
+        inputs.sort_by_key(|i| i.input_code);
+
+        config.monitors.push(MonitorConfig {
+            key,
+            label: name.to_string(),
+            backend_id,
+            serial,
+            model,
+            inputs,
+        });
+    }
+
+    for (name, steps) in grouped {
+        config.actions.push(Action {
+            name,
+            hotkey: None,
+            steps,
+        });
+    }
+
+    // Carry over any actions the file already had.
+    if let Some(existing) = value.get("actions").and_then(|v| v.as_array()) {
+        for raw in existing {
+            if let Ok(action) = raw.clone().try_into::<Action>() {
+                if !config
+                    .actions
+                    .iter()
+                    .any(|a| a.name.eq_ignore_ascii_case(&action.name))
+                {
+                    config.actions.push(action);
+                }
+            }
+        }
+    }
+
+    Ok(config)
 }
 
 /// Per-user config directory for this application.
@@ -395,39 +480,40 @@ pub fn default_state_dir() -> Result<PathBuf, ConfigError> {
         .ok_or(ConfigError::NoConfigDir)
 }
 
+impl fmt::Display for MonitorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.label, self.key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn mapping(code: &str, ev: Evidence) -> DestinationMapping {
-        DestinationMapping {
+    fn input(code: &str, label: &str) -> MonitorInput {
+        MonitorInput {
             input_code: code.parse().unwrap(),
-            verification: ev,
-            verified_on: None,
+            label: Some(label.into()),
+            verification: Evidence::UserConfirmed,
             note: None,
         }
     }
 
-    fn monitor(id: &str, backend: &str, serial: &str, win: &str, ubu: &str) -> MonitorConfig {
-        let mut destinations = BTreeMap::new();
-        destinations.insert("windows".into(), mapping(win, Evidence::UserConfirmed));
-        destinations.insert("ubuntu".into(), mapping(ubu, Evidence::UserConfirmed));
+    fn monitor(key: &str, backend: &str) -> MonitorConfig {
         MonitorConfig {
-            logical_id: id.into(),
-            name: format!("AOC 27P2DG5 - {id}"),
+            key: key.into(),
+            label: format!("AOC 27P2DG5 ({key})"),
             backend_id: backend.into(),
-            serial: Some(serial.into()),
+            serial: Some(key.into()),
             model: Some("27P2DG5".into()),
-            destinations,
+            inputs: vec![input("0x11", "HDMI-1"), input("0x0F", "DisplayPort-1")],
         }
     }
 
     fn sample() -> Config {
-        let mut c = Config::new("alienware-windows", BackendKind::PowerToysCli, "windows");
-        c.monitors
-            .push(monitor("left", "id-left", "SN-L", "0x11", "0x0F"));
-        c.monitors
-            .push(monitor("right", "id-right", "SN-R", "0x0F", "0x11"));
+        let mut c = Config::new("test-host", BackendKind::Fake);
+        c.monitors.push(monitor("SN-LEFT", "port-a"));
+        c.monitors.push(monitor("SN-RIGHT", "port-b"));
         c
     }
 
@@ -435,147 +521,155 @@ mod tests {
     fn round_trips_through_toml() {
         let c = sample();
         let text = toml::to_string_pretty(&c).unwrap();
-        let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(c, back);
-        // Codes must survive as hex, not be reformatted into decimal.
+        assert_eq!(Config::from_toml(&text).unwrap(), c);
+        // Codes stay hex rather than being reformatted into decimal.
         assert!(text.contains("0x11"), "{text}");
     }
 
     #[test]
-    fn rejects_duplicate_logical_ids() {
-        let mut c = sample();
-        c.monitors[1].logical_id = "left".into();
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn rejects_two_monitors_claiming_one_panel() {
-        let mut c = sample();
-        c.monitors[1].serial = Some("SN-L".into());
-        let err = c.validate().unwrap_err().to_string();
-        assert!(err.contains("same serial"), "{err}");
-    }
-
-    #[test]
-    fn rejects_duplicate_backend_ids() {
-        let mut c = sample();
-        c.monitors[1].backend_id = "id-left".into();
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_schema_version() {
-        let mut c = sample();
-        c.schema_version = 99;
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn switch_order_controls_sequence_and_keeps_unlisted_monitors() {
-        let mut c = sample();
-        c.switch_order = Some(vec!["right".into()]);
-        let ids: Vec<&str> = c
-            .ordered_monitors()
-            .iter()
-            .map(|m| m.logical_id.as_str())
-            .collect();
-        assert_eq!(ids, vec!["right", "left"]);
-    }
-
-    #[test]
-    fn switch_order_naming_an_unknown_monitor_is_rejected() {
-        let mut c = sample();
-        c.switch_order = Some(vec!["middle".into()]);
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn the_default_policy_leaves_the_desktop_completely_alone() {
-        let effects = SwitchSideEffects::default();
-        assert!(effects.is_input_only());
-        assert_eq!(effects.away, AwayAction::Nothing);
-        assert_eq!(effects.home, HomeAction::Nothing);
-    }
-
-    #[test]
-    fn the_two_layers_are_configured_independently() {
-        // Releasing on the way out without claiming on the way back is a
-        // legitimate combination, so neither field may imply the other.
-        let release_only = SwitchSideEffects {
-            away: AwayAction::Release,
-            home: HomeAction::Nothing,
-        };
-        assert!(!release_only.is_input_only());
-
-        let claim_only = SwitchSideEffects {
-            away: AwayAction::Nothing,
-            home: HomeAction::Claim,
-        };
-        assert!(!claim_only.is_input_only());
-    }
-
-    #[test]
-    fn side_effects_round_trip_through_toml() {
-        let mut c = sample();
-        c.on_switch = SwitchSideEffects {
-            away: AwayAction::Release,
-            home: HomeAction::Claim,
-        };
-        let text = toml::to_string_pretty(&c).unwrap();
-        assert!(text.contains("away = \"release\""), "{text}");
-        assert!(text.contains("home = \"claim\""), "{text}");
-        assert_eq!(toml::from_str::<Config>(&text).unwrap(), c);
-    }
-
-    #[test]
-    fn every_away_action_has_a_distinct_name() {
-        for (action, word) in [
-            (AwayAction::Nothing, "nothing"),
-            (AwayAction::Sweep, "sweep"),
-            (AwayAction::Release, "release"),
-        ] {
-            assert_eq!(action.to_string(), word);
+    fn nothing_in_the_schema_names_a_computer() {
+        let text = toml::to_string_pretty(&sample()).unwrap();
+        for forbidden in ["destination", "self_destination", "windows", "ubuntu"] {
+            assert!(
+                !text.to_lowercase().contains(forbidden),
+                "schema still mentions `{forbidden}`:\n{text}"
+            );
         }
-        assert_eq!(HomeAction::Claim.to_string(), "claim");
     }
 
     #[test]
-    fn a_config_without_the_setting_still_loads_and_changes_nothing() {
-        // Files written before this setting existed must keep working, and
-        // must not suddenly start rearranging someone's desktop.
-        let toml_text = r#"
+    fn monitors_can_be_named_by_key_label_or_serial() {
+        let c = sample();
+        assert!(c.monitor("SN-LEFT").is_some());
+        assert!(c.monitor("sn-left").is_some());
+        assert!(c.monitor("AOC 27P2DG5 (SN-LEFT)").is_some());
+        assert!(c.monitor("nope").is_none());
+    }
+
+    #[test]
+    fn duplicate_keys_and_connections_are_rejected() {
+        let mut c = sample();
+        c.monitors[1].key = "SN-LEFT".into();
+        assert!(c.validate().is_err());
+
+        let mut c = sample();
+        c.monitors[1].backend_id = "port-a".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn a_monitor_cannot_list_the_same_input_twice() {
+        let mut c = sample();
+        c.monitors[0].inputs.push(input("0x11", "HDMI again"));
+        assert!(c.validate().unwrap_err().to_string().contains("twice"));
+    }
+
+    #[test]
+    fn an_action_naming_an_unknown_monitor_is_rejected_on_save() {
+        // Better here than when a hotkey is pressed.
+        let mut c = sample();
+        c.actions.push(Action {
+            name: "Broken".into(),
+            hotkey: None,
+            steps: vec![ActionStep::SetInput {
+                monitor: "SN-GONE".into(),
+                code: "0x11".parse().unwrap(),
+            }],
+        });
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("SN-GONE"), "{err}");
+    }
+
+    #[test]
+    fn input_names_fall_back_sensibly() {
+        let labelled = input("0x11", "Laptop");
+        assert_eq!(labelled.display_name(), "Laptop");
+
+        let unlabelled = MonitorInput::reported("0x0F".parse().unwrap(), None);
+        assert_eq!(unlabelled.display_name(), "DisplayPort-1");
+
+        let unknown = MonitorInput::reported("0x42".parse().unwrap(), None);
+        assert_eq!(unknown.display_name(), "0x42");
+    }
+
+    /// The old schema was organised around destination computers. Upgrading
+    /// has to keep the verified codes — they cost a human watching a screen —
+    /// and turn each destination into an action the user now owns.
+    #[test]
+    fn a_schema_1_file_upgrades_into_monitors_and_actions() {
+        let v1 = r#"
+schema_version = 1
+host = "BERKANT16X"
+backend = "powertoys-cli"
+self_destination = "windows"
+timeout_seconds = 20
+settle_ms = 900
+
+[[monitors]]
+logical_id = "main"
+name = "AOC 27P2DG5"
+backend_id = "\\?\\DISPLAY#AOC2702#UID4613"
+serial = "ASFPA9A001108"
+model = "27P2DG5"
+
+[monitors.destinations.windows]
+input_code = "0x11"
+verification = "user-confirmed"
+
+[monitors.destinations.ubuntu]
+input_code = "0x0F"
+verification = "user-confirmed"
+"#;
+        let config = Config::from_toml(v1).unwrap();
+        assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert_eq!(config.timeout_seconds, 20);
+        assert_eq!(config.settle_ms, 900);
+
+        // The panel is keyed by serial, and keeps both verified inputs.
+        assert_eq!(config.monitors.len(), 1);
+        let monitor = &config.monitors[0];
+        assert_eq!(monitor.key, "ASFPA9A001108");
+        assert_eq!(monitor.inputs.len(), 2);
+        assert!(monitor
+            .inputs
+            .iter()
+            .all(|i| i.verification == Evidence::UserConfirmed));
+
+        // Each old destination survives as an action the user can rename.
+        let names: Vec<&str> = config.actions.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"windows"), "{names:?}");
+        assert!(names.contains(&"ubuntu"), "{names:?}");
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn an_upgraded_config_still_validates_and_saves() {
+        let v1 = r#"
 schema_version = 1
 host = "h"
 backend = "fake"
-self_destination = "windows"
-"#;
-        let config: Config = toml::from_str(toml_text).unwrap();
-        assert!(config.on_switch.is_input_only());
-    }
-
-    #[test]
-    fn destinations_are_collected_across_monitors() {
-        assert_eq!(sample().destinations(), vec!["ubuntu", "windows"]);
-    }
-
-    #[test]
-    fn bare_decimal_input_code_in_toml_is_rejected() {
-        let toml_text = r#"
-schema_version = 1
-host = "h"
-backend = "powertoys-cli"
-self_destination = "windows"
+self_destination = "a"
 
 [[monitors]]
-logical_id = "left"
-name = "left"
-backend_id = "b"
+logical_id = "one"
+name = "One"
+backend_id = "b1"
+serial = "S1"
 
-[monitors.destinations.windows]
-input_code = "11"
+[monitors.destinations.a]
+input_code = "0x11"
 verification = "user-confirmed"
 "#;
-        let err = toml::from_str::<Config>(toml_text).unwrap_err().to_string();
-        assert!(err.contains("0x"), "{err}");
+        let config = Config::from_toml(v1).unwrap();
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert_eq!(Config::from_toml(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn an_unknown_future_schema_is_refused_rather_than_guessed_at() {
+        let mut c = sample();
+        c.schema_version = 99;
+        assert!(c.validate().is_err());
     }
 }

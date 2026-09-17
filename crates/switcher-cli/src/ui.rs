@@ -88,37 +88,18 @@ pub fn confirm(question: &str) -> Result<bool, PromptError> {
     }
 }
 
-/// Pick one of `options`, returning its index.
-pub fn choose(question: &str, options: &[String]) -> Result<usize, PromptError> {
-    println!("{question}");
-    for (i, option) in options.iter().enumerate() {
-        println!("  {}) {option}", i + 1);
-    }
-    loop {
-        let answer = read_line("Choice: ")?;
-        match answer.parse::<usize>() {
-            Ok(n) if n >= 1 && n <= options.len() => return Ok(n - 1),
-            _ => println!("  (enter a number between 1 and {})", options.len()),
-        }
-    }
-}
-
-/// Printed before any first write to a monitor, and in every failure report.
+/// Recovery instructions, printed with every refusal and failure.
 pub const RECOVERY_NOTE: &str = "\
 If a screen goes blank or stops responding:
-  - Use the monitor's own buttons: open the on-screen menu and pick the input
-    by hand. This always works and needs no computer.
-  - On this laptop, the built-in panel stays available; Windows will fall back
-    to it if the external displays disappear.
-  - Run `desktop-switcher switch <destination>` again once a screen is back.
-    Every switch sets an absolute input, so repeating it is safe.";
+  - Use the monitor's own buttons: open its on-screen menu and pick the input
+    by hand. This always works and needs no computer at all.
+  - A laptop's built-in panel stays available, so the desktop falls back to it
+    if the external displays disappear.
+  - Run `desktop-switcher set <monitor> 0xNN` again once a screen is back. An
+    input is set absolutely, so repeating it is safe.";
 
-pub fn print_recovery_note() {
-    println!("\n{RECOVERY_NOTE}");
-}
-
-/// The same note on stderr, so it stays attached to a refusal or a failure
-/// even when the two streams are redirected separately.
+/// On stderr, so it stays attached to a refusal or failure even when the two
+/// streams are redirected separately.
 pub fn eprint_recovery_note() {
     eprintln!("\n{RECOVERY_NOTE}");
 }

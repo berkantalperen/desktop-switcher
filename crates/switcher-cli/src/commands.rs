@@ -1,4 +1,8 @@
 //! Command implementations.
+//!
+//! The vocabulary is monitors and inputs. Nothing here knows or asks what is
+//! plugged into an input — that meaning lives in the name a person gives an
+//! action.
 
 use std::time::Duration;
 
@@ -6,13 +10,10 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use switcher_core::actions::ActionStep;
 use switcher_core::backend::Severity;
-use switcher_core::config::{
-    AwayAction, Config, DestinationMapping, HomeAction, MonitorConfig, SwitchSideEffects,
-};
-use switcher_core::eventlog;
-use switcher_core::inventory::{self, Binding};
-use switcher_core::switch::{self, ExecOptions, LastRequest, SwitchGuard, SwitchReport};
-use switcher_core::types::{DetectedMonitor, Evidence, InputCode, InputReading};
+use switcher_core::config::{Config, MonitorConfig, MonitorInput};
+use switcher_core::inventory;
+use switcher_core::switch::{self, ApplyReport, ExecOptions, LastRequest, SwitchGuard};
+use switcher_core::types::{DetectedMonitor, Evidence, InputCode, InputReading, MonitorIdentity};
 
 use crate::desktop;
 use crate::ui;
@@ -56,65 +57,37 @@ pub fn doctor(app: &App) -> Result<i32> {
     match &app.config {
         None => {
             println!("\n  [BLOCKER] No configuration yet.");
-            println!("         Run `desktop-switcher configure` to identify the monitors");
-            println!("         and record verified input codes.");
+            println!("         Run `desktop-switcher configure`.");
             blockers += 1;
         }
         Some(config) => {
             ui::field("host", &config.host);
-            ui::field("this computer is", &config.self_destination);
-            ui::field("destinations", config.destinations().join(", "));
             ui::field("monitors", config.monitors.len().to_string());
+            ui::field("actions", config.actions.len().to_string());
 
-            println!();
-            for monitor in &config.monitors {
-                for destination in config.destinations() {
-                    match monitor.mapping(&destination) {
-                        Some(m) if m.verification.is_trusted_for_switching() => println!(
-                            "  [ok] {} -> {destination}: {} ({})",
-                            monitor.logical_id, m.input_code, m.verification
-                        ),
-                        Some(m) => println!(
-                            "  [warn] {} -> {destination}: {} is only {}; switching will refuse it",
-                            monitor.logical_id, m.input_code, m.verification
-                        ),
-                        None => println!(
-                            "  [warn] {} -> {destination}: not configured",
-                            monitor.logical_id
-                        ),
-                    }
-                }
-            }
-
-            // Binding is the check that actually gates a switch.
-            ui::heading("Identification");
             match app.backend.discover() {
                 Err(e) => {
-                    println!("  [BLOCKER] Could not enumerate displays: {e}");
+                    println!("\n  [BLOCKER] Could not enumerate displays: {e}");
                     blockers += 1;
                 }
                 Ok(detected) => {
                     let duplicates = inventory::duplicate_serials(&detected);
                     if !duplicates.is_empty() {
                         println!(
-                            "  [BLOCKER] Serial(s) {} appear on more than one display.",
+                            "\n  [BLOCKER] Serial(s) {} appear on more than one display; \
+                             every binding that relies on them is ambiguous.",
                             duplicates.join(", ")
                         );
-                        println!("         Every binding that relies on them is ambiguous.");
                         blockers += 1;
                     }
                     let bindings = inventory::bind(config, &detected);
+                    println!();
                     for binding in &bindings.bound {
                         println!(
                             "  [ok] {} -> {}",
-                            binding.logical_id(),
+                            binding.key(),
                             binding.detected.identity.describe()
                         );
-                        for note in &binding.notes {
-                            for line in textwrap(note, 72) {
-                                println!("         {line}");
-                            }
-                        }
                     }
                     for problem in &bindings.problems {
                         println!("  [BLOCKER] {problem}");
@@ -133,74 +106,93 @@ pub fn doctor(app: &App) -> Result<i32> {
 
     ui::heading("Summary");
     if blockers == 0 {
-        println!("  No blockers. `switch` should work.");
+        println!("  No blockers.");
     } else {
-        println!("  {blockers} blocker(s). `switch` will refuse until they are resolved.");
+        println!("  {blockers} blocker(s).");
     }
     println!("\n  Event log: {}", app.log.path().display());
-
     Ok(if blockers == 0 { 0 } else { 2 })
 }
 
 // ---------------------------------------------------------------------------
-// monitors
+// monitors — the main view
 // ---------------------------------------------------------------------------
 
 pub fn monitors(app: &App) -> Result<i32> {
     let detected = app.backend.discover().context("enumerating displays")?;
+    let switchable: Vec<&DetectedMonitor> = detected
+        .iter()
+        .filter(|d| d.identity.transport.supports_input_switching())
+        .collect();
 
-    ui::heading(&format!("Displays seen by {}", app.backend.name()));
-    if detected.is_empty() {
-        println!("  (none)");
+    ui::heading(&format!("Monitors ({})", app.backend.name()));
+    if switchable.is_empty() {
+        println!("  No monitor on this computer can have its input switched.");
         return Ok(1);
     }
 
-    for monitor in &detected {
-        let id = &monitor.identity;
-        let logical = app
+    for monitor in &switchable {
+        let identity = &monitor.identity;
+        let configured = app
             .config
             .as_ref()
-            .and_then(|c| {
-                c.monitors
-                    .iter()
-                    .find(|m| m.serial.is_some() && m.serial == id.serial)
-                    .or_else(|| c.monitors.iter().find(|m| m.backend_id == id.backend_id))
-            })
-            .map(|m| m.logical_id.clone());
+            .and_then(|c| find_configured(c, identity));
 
         println!();
         println!(
-            "{}{}",
-            id.model.as_deref().unwrap_or("(unnamed display)"),
-            logical
-                .map(|l| format!("  [configured as `{l}`]"))
-                .unwrap_or_default()
+            "{}",
+            configured
+                .map(|m| m.label.clone())
+                .unwrap_or_else(|| identity.describe())
         );
-        ui::field(
-            "manufacturer",
-            id.manufacturer.as_deref().unwrap_or("(unknown)"),
-        );
-        ui::field(
-            "serial",
-            id.serial
-                .as_deref()
-                .unwrap_or("(none published — cannot be told apart from an identical panel)"),
-        );
-        ui::field("connection", &id.backend_id);
-        ui::field("transport", id.transport.to_string());
-        ui::field(
-            "input switching",
-            if id.transport.supports_input_switching() {
-                "supported"
-            } else {
-                "not available over this transport"
-            },
-        );
-        if let Some(n) = id.discovery_index {
-            ui::field(
-                "discovery index",
-                format!("{n}  (changes between runs; never used to address a write)"),
-            );
+        match configured {
+            Some(cfg) => ui::field("name it by", &cfg.key),
+            None => ui::field(
+                "not configured",
+                "run `configure` to name it and list its inputs",
+            ),
+        }
+        ui::field("connection", &identity.backend_id);
+
+        let current = app.backend.read_input(&monitor.handle()).ok();
+        match &current {
+            Some(InputReading::Value(code)) => {
+                ui::field("current input", InputReading::Value(*code).to_string())
+            }
+            Some(other) => ui::field("current input", other.to_string()),
+            None => ui::field("current input", "could not be read"),
+        }
+
+        let inputs = known_inputs(app, monitor, configured);
+        if inputs.is_empty() {
+            ui::field("inputs", "none reported");
+        } else {
+            let mut first = true;
+            for input in &inputs {
+                let marker = if current
+                    .as_ref()
+                    .and_then(|r| r.value())
+                    .is_some_and(|c| c == input.input_code)
+                {
+                    "  <- now"
+                } else {
+                    ""
+                };
+                let line = format!("{}  {}{}", input.input_code, input.display_name(), marker);
+                if first {
+                    ui::field("inputs", line);
+                    first = false;
+                } else {
+                    ui::field_cont(line);
+                }
+            }
+        }
+
+        if let Some(cfg) = configured {
+            ui::field_cont(format!(
+                "set with: desktop-switcher set {} 0xNN",
+                shell_quote(&cfg.key)
+            ));
         }
     }
 
@@ -212,138 +204,149 @@ pub fn monitors(app: &App) -> Result<i32> {
             duplicates.join(", ")
         ));
     }
-
     Ok(0)
 }
 
+/// Configured inputs when we have them, otherwise whatever the monitor says.
+fn known_inputs(
+    app: &App,
+    monitor: &DetectedMonitor,
+    configured: Option<&MonitorConfig>,
+) -> Vec<MonitorInput> {
+    match configured {
+        Some(cfg) if !cfg.inputs.is_empty() => cfg.inputs.clone(),
+        _ => app
+            .backend
+            .input_capabilities(&monitor.handle())
+            .map(|caps| {
+                caps.options
+                    .iter()
+                    .map(|o| MonitorInput::reported(o.code, o.label.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn find_configured<'a>(
+    config: &'a Config,
+    identity: &MonitorIdentity,
+) -> Option<&'a MonitorConfig> {
+    config
+        .monitors
+        .iter()
+        .find(|m| m.serial.is_some() && m.serial == identity.serial)
+        .or_else(|| {
+            config
+                .monitors
+                .iter()
+                .find(|m| m.backend_id == identity.backend_id)
+        })
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.contains(' ') {
+        format!("\"{s}\"")
+    } else {
+        s.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
-// inspect
+// set — the core command
 // ---------------------------------------------------------------------------
 
-pub fn inspect(app: &App, target: Option<&str>) -> Result<i32> {
-    let detected = app.backend.discover().context("enumerating displays")?;
+pub fn set_input(
+    app: &App,
+    monitor: &str,
+    code_text: &str,
+    dry_run: bool,
+    force: bool,
+) -> Result<i32> {
+    let config = require_config(app)?;
+    let code: InputCode = code_text.parse().map_err(|e| anyhow!("{e}"))?;
+    let request = format!("set {monitor} {code}");
 
-    let selected: Vec<&DetectedMonitor> = match target {
-        None => detected
-            .iter()
-            .filter(|d| d.identity.transport.supports_input_switching())
-            .collect(),
-        Some(name) => {
-            let matched = resolve_detected(app, &detected, name)?;
-            vec![matched]
+    if !dry_run && !force {
+        let last = LastRequest::load(&app.state_dir);
+        if last.is_duplicate_of(&request, Duration::from_millis(config.dedupe_ms)) {
+            println!("Already requested that a moment ago; ignoring the repeat.");
+            return Ok(0);
+        }
+    }
+
+    // Held only for a one-off request. Inside an action the whole sequence is
+    // already guarded, and taking it again here would deadlock against it.
+    let _guard = if dry_run || force {
+        None
+    } else {
+        match SwitchGuard::acquire(&app.state_dir, LOCK_STALE_AFTER) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Ok(1);
+            }
         }
     };
 
-    if selected.is_empty() {
-        println!("No display supports input switching.");
-        return Ok(1);
-    }
+    let detected = app.backend.discover().context("enumerating displays")?;
+    let plan = match switch::plan_set_input(config, &detected, monitor, code) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Refusing to change the input.\n\n{e}");
+            ui::eprint_recovery_note();
+            return Ok(2);
+        }
+    };
 
-    for monitor in selected {
-        let identity = &monitor.identity;
-        let logical = app.config.as_ref().and_then(|c| {
-            c.monitors
-                .iter()
-                .find(|m| m.serial.is_some() && m.serial == identity.serial)
-                .or_else(|| {
-                    c.monitors
-                        .iter()
-                        .find(|m| m.backend_id == identity.backend_id)
-                })
-        });
-
-        ui::heading(&format!(
-            "{}{}",
-            logical
-                .map(|m| format!("{} — ", m.logical_id))
-                .unwrap_or_default(),
-            identity.describe()
+    if !plan.advertised {
+        ui::warn(format!(
+            "{code} is not in this monitor's advertised input list. That can still be \
+             correct, since capability strings are often wrong, but it may do nothing \
+             or blank the screen."
         ));
-        ui::field("connection", &identity.backend_id);
+    }
 
-        // What the monitor claims. A claim, and labelled as one.
-        let handle = monitor.handle();
-        match app.backend.input_capabilities(&handle) {
-            Ok(caps) if caps.feature_present && !caps.options.is_empty() => {
-                let rendered: Vec<String> = caps.options.iter().map(|o| o.to_string()).collect();
-                ui::field("reported input codes", rendered.join(", "));
-                ui::field_cont(format!(
-                    "[{}] the monitor's own claim; it may list inputs that",
-                    Evidence::Reported
-                ));
-                ui::field_cont("do not exist or omit ones that do");
-                if let Some(raw) = &caps.raw_capabilities {
-                    ui::field_cont(format!("raw: {raw}"));
-                }
-            }
-            Ok(_) => ui::field("reported input codes", "monitor did not advertise VCP 0x60"),
-            Err(e) => ui::field("reported input codes", format!("unavailable: {e}")),
-        }
+    let opts = ExecOptions {
+        settle: Duration::from_millis(config.settle_ms),
+        read_back: true,
+        dry_run,
+    };
+    let step = switch::apply_one(&plan, app.backend.as_ref(), opts, &app.log);
+    if !dry_run {
+        LastRequest::record(&app.state_dir, &request);
+    }
 
-        // What it reads right now.
-        match app.backend.read_input(&handle) {
-            Ok(InputReading::Value(code)) => {
-                ui::field(
-                    "last read current",
-                    format!("{}", InputReading::Value(code)),
-                );
-                ui::field_cont(format!("[{}]", Evidence::ReadConfirmed));
-            }
-            Ok(other) => ui::field("last read current", other.to_string()),
-            Err(e) => ui::field("last read current", format!("unavailable: {e}")),
-        }
+    let report = ApplyReport {
+        steps: vec![step],
+        dry_run,
+    };
+    print_report(&report);
+    Ok(report.exit_code())
+}
 
-        // What we have actually proven by writing.
-        let write_tested = logical
-            .map(|m| {
-                m.destinations
-                    .values()
-                    .any(|d| d.verification >= Evidence::WriteConfirmed)
-            })
-            .unwrap_or(false);
-        ui::field(
-            "write tested",
-            if write_tested {
-                "yes — at least one mapping was confirmed by a real switch"
-            } else {
-                "no — no input code on this monitor has been proven by writing"
-            },
-        );
-
-        // What is configured.
-        match logical {
-            None => ui::field("configured mapping", "not configured"),
-            Some(cfg) if cfg.destinations.is_empty() => {
-                ui::field("configured mapping", "no destinations recorded")
-            }
-            Some(cfg) => {
-                let mut first = true;
-                for (destination, mapping) in &cfg.destinations {
-                    let line = format!(
-                        "{destination} -> {} [{}{}]",
-                        mapping.input_code,
-                        mapping.verification,
-                        mapping
-                            .verified_on
-                            .as_deref()
-                            .map(|d| format!(", {d}"))
-                            .unwrap_or_default()
-                    );
-                    if first {
-                        ui::field("configured mapping", line);
-                        first = false;
-                    } else {
-                        ui::field_cont(line);
-                    }
-                }
+fn print_report(report: &ApplyReport) {
+    for step in &report.steps {
+        let detail = if report.dry_run {
+            "would be set (dry run)".to_string()
+        } else if step.skipped_already_correct {
+            "already on that input; no write issued".to_string()
+        } else {
+            step.outcome.to_string()
+        };
+        println!("  {:<26} {} -> {}", step.label, step.requested, detail);
+        if let Some(after) = &step.after {
+            if !matches!(after, InputReading::Value(_)) {
+                println!("  {:<26}   read-back: {after}", "");
             }
         }
     }
-
-    println!();
-    println!("Nothing above was written. To prove a code, use:");
-    println!("  desktop-switcher test-input --monitor <id> --code 0xNN --destination <name>");
-    Ok(0)
+    if !report.dry_run {
+        println!("\n  {}", report.status());
+        if report.exit_code() != 0 {
+            ui::eprint_recovery_note();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +359,6 @@ pub fn status(app: &App) -> Result<i32> {
     let bindings = inventory::bind(config, &detected);
 
     ui::heading("Observed now");
-    let mut readings = Vec::new();
     for binding in &bindings.bound {
         let reading = app
             .backend
@@ -364,265 +366,26 @@ pub fn status(app: &App) -> Result<i32> {
             .unwrap_or_else(|e| InputReading::ReadFailed {
                 detail: e.to_string(),
             });
-        let destination = match &reading {
-            InputReading::Value(code) => matching_destination(binding, *code),
-            _ => None,
-        };
-        println!(
-            "  {:<10} {}{}",
-            binding.logical_id(),
-            reading,
-            destination
-                .map(|d| format!("  = {d}"))
-                .unwrap_or_else(|| "  = not a configured destination".to_string())
-        );
-        readings.push((binding.logical_id().to_string(), reading));
+        let named = reading
+            .value()
+            .and_then(|c| binding.monitor.input(c))
+            .map(|i| format!("  ({})", i.display_name()))
+            .unwrap_or_default();
+        println!("  {:<26} {reading}{named}", binding.monitor.label);
     }
     for problem in &bindings.problems {
         println!("  {problem}");
     }
 
     ui::heading("Last requested by this tool");
-    println!("  This is intent, not proof of what the monitors show. Inputs can also");
-    println!("  be changed with the monitor buttons, or by the other computer.\n");
-    let last = LastRequest::load(&app.state_dir);
-    match last.destination {
-        Some(d) => println!("  {d}"),
+    println!("  This is intent, not proof. Inputs can also be changed with the monitor");
+    println!("  buttons, or by any other computer attached to them.\n");
+    match LastRequest::load(&app.state_dir).request {
+        Some(r) => println!("  {r}"),
         None => println!("  (nothing recorded yet)"),
     }
 
-    if !bindings.problems.is_empty() {
-        return Ok(1);
-    }
-    Ok(0)
-}
-
-fn matching_destination(binding: &Binding<'_>, code: InputCode) -> Option<String> {
-    let matches: Vec<&String> = binding
-        .monitor
-        .destinations
-        .iter()
-        .filter(|(_, m)| m.input_code == code)
-        .map(|(name, _)| name)
-        .collect();
-    match matches.as_slice() {
-        [one] => Some((*one).clone()),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// switch / toggle
-// ---------------------------------------------------------------------------
-
-/// Per-invocation overrides for the layer-2 side effects of a switch.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SwitchFlags {
-    pub release: bool,
-    pub sweep: bool,
-    pub claim: bool,
-}
-
-impl SwitchFlags {
-    /// Combine configured defaults with what was asked for on this run.
-    fn resolve(self, configured: SwitchSideEffects) -> SwitchSideEffects {
-        let mut effects = configured;
-        if self.sweep {
-            effects.away = AwayAction::Sweep;
-        }
-        if self.release {
-            effects.away = AwayAction::Release;
-        }
-        if self.claim {
-            effects.home = HomeAction::Claim;
-        }
-        effects
-    }
-}
-
-pub fn switch(
-    app: &App,
-    destination: &str,
-    dry_run: bool,
-    force: bool,
-    flags: SwitchFlags,
-) -> Result<i32> {
-    let config = require_config(app)?;
-    let mut effects = flags.resolve(config.on_switch);
-
-    // The topology actions are gated the same way the standalone commands
-    // are; a switch is not a way around that.
-    if !app.experimental {
-        if effects.away == AwayAction::Release {
-            ui::warn(
-                "ignoring --release: changing display topology is not reliable yet. \
-                 Use --sweep, or pass --experimental.",
-            );
-            effects.away = AwayAction::Nothing;
-        }
-        if effects.home == HomeAction::Claim {
-            ui::warn("ignoring --claim: pass --experimental to allow topology changes.");
-            effects.home = HomeAction::Nothing;
-        }
-    }
-
-    if !dry_run && !force {
-        let last = LastRequest::load(&app.state_dir);
-        if last.is_duplicate_of(destination, Duration::from_millis(config.dedupe_ms)) {
-            println!("Already requested `{destination}` a moment ago; ignoring the repeat.");
-            println!("Use --force to issue it anyway.");
-            return Ok(0);
-        }
-    }
-
-    // Serialise against another shortcut press or a second instance.
-    let _guard = if dry_run {
-        None
-    } else {
-        match SwitchGuard::acquire(&app.state_dir, LOCK_STALE_AFTER) {
-            Ok(g) => Some(g),
-            Err(e) => {
-                eprintln!("error: {e}");
-                eprintln!(
-                    "Two switches must not drive the same monitors at once. Try again in a moment."
-                );
-                return Ok(1);
-            }
-        }
-    };
-
-    let detected = app.backend.discover().context("enumerating displays")?;
-    let plan = match switch::plan(config, &detected, destination) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Refusing to switch.\n");
-            eprintln!("{e}");
-            ui::eprint_recovery_note();
-            return Ok(2);
-        }
-    };
-
-    for note in &plan.notes {
-        ui::warn(note);
-    }
-
-    if dry_run {
-        ui::heading(&format!("Dry run: switch to `{destination}`"));
-        for write in &plan.writes {
-            println!(
-                "  {:<10} would write {} to {}",
-                write.logical_id, write.code, write.handle.backend_id
-            );
-        }
-        println!("\nNothing was written.");
-        return Ok(0);
-    }
-
-    // Ordering is dictated by the hardware, not by taste.
-    //
-    // A detached display has its output powered down, and a powered-down
-    // output takes the DDC lines with it — we watched exactly that happen on
-    // the Ubuntu side when its screen blanked. So a claim has to come *before*
-    // the write, to bring the link up in time for it, and a release has to
-    // come *after*, or there would be nothing left to write through.
-    //
-    // A sweep does not change the topology, so it goes first, while the
-    // windows being moved are still visible.
-    if !plan.switching_away && effects.home == HomeAction::Claim {
-        for write in &plan.writes {
-            desktop::apply_home(app, &write.handle.backend_id, &write.logical_id);
-        }
-    }
-    if plan.switching_away && effects.away == AwayAction::Sweep {
-        for write in &plan.writes {
-            desktop::apply_away(app, &write.handle.backend_id, &write.logical_id, false);
-        }
-    }
-
-    let opts = ExecOptions {
-        settle: Duration::from_millis(config.settle_ms),
-        read_back: true,
-        dry_run: false,
-    };
-    let report = switch::execute(&plan, app.backend.as_ref(), opts, &app.log);
-
-    if plan.switching_away && effects.away == AwayAction::Release {
-        for write in &plan.writes {
-            desktop::apply_away(app, &write.handle.backend_id, &write.logical_id, true);
-        }
-    }
-    if !LastRequest::record(&app.state_dir, destination) {
-        ui::warn(format!(
-            "could not record this request under {}; the repeat-press guard will not work",
-            app.state_dir.display()
-        ));
-    }
-
-    print_switch_report(&report);
-    Ok(report.exit_code())
-}
-
-pub fn toggle(app: &App, dry_run: bool, flags: SwitchFlags) -> Result<i32> {
-    let config = require_config(app)?;
-    let detected = app.backend.discover().context("enumerating displays")?;
-    let bindings = inventory::bind(config, &detected);
-
-    if !bindings.is_complete() {
-        eprintln!("Refusing to toggle: not every monitor could be identified.\n");
-        for problem in &bindings.problems {
-            eprintln!("  - {problem}");
-        }
-        return Ok(2);
-    }
-
-    let mut readings = Vec::new();
-    for binding in &bindings.bound {
-        let reading = app
-            .backend
-            .read_input(&binding.handle())
-            .unwrap_or_else(|e| InputReading::ReadFailed {
-                detail: e.to_string(),
-            });
-        readings.push((binding.logical_id().to_string(), reading));
-    }
-
-    match switch::infer_toggle_target(config, &readings) {
-        Ok(target) => {
-            println!("Current state is unambiguous; switching to `{target}`.");
-            switch(app, &target, dry_run, false, flags)
-        }
-        Err(reason) => {
-            eprintln!("Refusing to toggle.\n");
-            eprintln!("  {reason}");
-            eprintln!("\nCurrent readings:");
-            for (id, reading) in &readings {
-                eprintln!("  {id:<10} {reading}");
-            }
-            Ok(2)
-        }
-    }
-}
-
-fn print_switch_report(report: &SwitchReport) {
-    ui::heading(&format!("Switch to `{}`", report.destination));
-    for step in &report.steps {
-        let detail = if step.skipped_already_correct {
-            "already on the requested input; no write issued".to_string()
-        } else {
-            step.outcome.to_string()
-        };
-        println!("  {:<10} {} -> {}", step.logical_id, step.requested, detail);
-        if let Some(after) = &step.after {
-            if !matches!(after, InputReading::Value(_)) {
-                println!("  {:<10}   read-back: {after}", "");
-            }
-        }
-    }
-    println!("\n  {}", report.status());
-
-    if report.exit_code() != 0 {
-        ui::print_recovery_note();
-    }
+    Ok(if bindings.problems.is_empty() { 0 } else { 1 })
 }
 
 // ---------------------------------------------------------------------------
@@ -633,12 +396,10 @@ pub fn actions(app: &App) -> Result<i32> {
     let config = require_config(app)?;
     ui::heading("Actions");
     if config.actions.is_empty() {
-        println!("  None configured yet.");
-        println!("\n  Add them in the GUI (`desktop-switcher-gui`), or by hand in");
+        println!("  None yet. Add them in the GUI, or by hand in");
         println!("  {}", app.config_path.display());
         return Ok(0);
     }
-
     for action in &config.actions {
         println!();
         println!(
@@ -661,17 +422,14 @@ pub fn actions(app: &App) -> Result<i32> {
     Ok(0)
 }
 
-/// Execute a named action, step by step, stopping at the first failure.
+/// Execute a named action, stopping at the first failure.
 ///
-/// Later steps generally assume the earlier ones happened — sweeping a
-/// monitor is pointless if the switch meant to send it away never occurred —
-/// so a failure stops the sequence rather than ploughing on.
+/// Later steps generally assume the earlier ones happened, so carrying on
+/// after a failure would produce a state nobody asked for.
 pub fn run_action(app: &App, name: &str) -> Result<i32> {
     let config = require_config(app)?;
     let action = config
-        .actions
-        .iter()
-        .find(|a| a.name.eq_ignore_ascii_case(name))
+        .action(name)
         .ok_or_else(|| {
             anyhow!(
                 "no action called `{name}`. Configured: {}",
@@ -697,6 +455,22 @@ pub fn run_action(app: &App, name: &str) -> Result<i32> {
             action.name
         );
     }
+
+    // Deduplicate and lock the action as a whole, so a held hotkey cannot
+    // replay it and two actions cannot interleave on the same DDC lines.
+    let last = LastRequest::load(&app.state_dir);
+    if last.is_duplicate_of(&action.name, Duration::from_millis(config.dedupe_ms)) {
+        println!("`{}` ran a moment ago; ignoring the repeat.", action.name);
+        return Ok(0);
+    }
+    let _guard = match SwitchGuard::acquire(&app.state_dir, LOCK_STALE_AFTER) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(1);
+        }
+    };
+    LastRequest::record(&app.state_dir, &action.name);
 
     app.log.append(
         "action.begin",
@@ -737,16 +511,19 @@ pub fn run_action(app: &App, name: &str) -> Result<i32> {
 
 fn run_step(app: &App, step: &ActionStep) -> Result<i32> {
     match step {
-        ActionStep::Switch { destination } => {
-            switch(app, destination, false, false, SwitchFlags::default())
+        // `force` because the action already holds the lock and has been
+        // deduplicated; taking either again here would fight itself.
+        ActionStep::SetInput { monitor, code } => {
+            set_input(app, monitor, &code.to_string(), false, true)
         }
         ActionStep::Sweep { monitor } => desktop::sweep(app, monitor.as_deref()),
+        ActionStep::RestoreWindows { monitor } => desktop::restore_windows(app, monitor.as_deref()),
         ActionStep::Release { monitor } => desktop::release(app, monitor.as_deref()),
         ActionStep::Claim { monitor } => desktop::claim(app, monitor.as_deref()),
         ActionStep::Primary { monitor } => desktop::set_primary(app, monitor.as_deref()),
         ActionStep::Run { command, args } => {
-            // Started, not awaited: these are things like launching an editor,
-            // and blocking a hotkey until the user closes it would be wrong.
+            // Started, not awaited: these launch programs, and blocking a
+            // hotkey until the user closes one would be wrong.
             match std::process::Command::new(command).args(args).spawn() {
                 Ok(child) => {
                     println!("  started (pid {})", child.id());
@@ -773,406 +550,118 @@ pub fn configure(app: &mut App) -> Result<i32> {
         .collect();
 
     if switchable.is_empty() {
-        bail!("No display supports input switching, so there is nothing to configure. Run `desktop-switcher doctor` first.");
+        bail!("No monitor on this computer can have its input switched. Run `doctor` first.");
     }
-
     let duplicates = inventory::duplicate_serials(&detected);
     if !duplicates.is_empty() {
         bail!(
-            "Serial(s) {} appear on more than one display. These panels cannot be told apart \
-             reliably, so configuring them would produce bindings that silently address the \
-             wrong screen. Resolve this before continuing.",
+            "Serial(s) {} appear on more than one display. Those panels cannot be told \
+             apart, so binding them would address the wrong screen.",
             duplicates.join(", ")
         );
     }
 
     ui::heading("Configure");
-    println!("Nothing is written to a monitor by this command except where it");
-    println!("asks you first, one monitor at a time.");
+    println!("This records which monitors exist and what inputs they offer.");
+    println!("It writes nothing to a monitor.");
     println!("\nPress Enter to accept any suggestion in [brackets].");
 
     let existing = app.config.clone();
-
-    // Two names, and they are the words typed at the command line. Asking
-    // separately for a "host name" and a "destination name" only invited
-    // people to give this computer the other computer's name.
-    ui::heading("Naming the two computers");
-    println!("These are the words you will type to switch, as in");
-    println!("`desktop-switcher switch <name>`. Short and lowercase is easiest.\n");
-
-    let default_self = existing
-        .as_ref()
-        .map(|c| c.self_destination.clone())
-        .unwrap_or_else(|| if cfg!(windows) { "windows" } else { "ubuntu" }.to_string());
-    let self_destination = ui::ask(
-        &format!(
-            "  Name for THIS computer, the one you are typing on ({})",
-            system_hostname()
-        ),
-        Some(&default_self),
-    )?;
-
-    let default_other = existing
-        .as_ref()
-        .and_then(|c| {
-            c.destinations()
-                .into_iter()
-                .find(|d| *d != self_destination)
-        })
-        .unwrap_or_else(|| {
-            if self_destination == "windows" {
-                "ubuntu"
-            } else {
-                "windows"
-            }
-            .to_string()
-        });
-    let other_destination = ui::ask("  Name for the OTHER computer", Some(&default_other))?;
-
-    if other_destination == self_destination {
-        bail!("Both computers cannot be called `{self_destination}`. Run configure again and give them different names.");
-    }
-    println!("\n  `switch {self_destination}` will bring the monitors here.");
-    println!("  `switch {other_destination}` will send them to the other computer.");
-
-    // Only used for display and logs, so there is no reason to ask.
-    let host = system_hostname();
-
-    let mut config = Config::new(host, app.backend_kind, self_destination.clone());
+    let mut config = Config::new(system_hostname(), app.backend_kind);
     if let Some(prev) = &existing {
         config.timeout_seconds = prev.timeout_seconds;
         config.settle_ms = prev.settle_ms;
         config.dedupe_ms = prev.dedupe_ms;
+        config.tool_path = prev.tool_path.clone();
+        config.actions = prev.actions.clone();
     }
 
-    println!(
-        "\nIdentifying displays. There are {} to place.",
-        switchable.len()
-    );
-    println!("Each is listed with its serial number, which is printed on the back of");
-    println!("the monitor and is the only thing that tells two identical panels apart.\n");
-
-    let mut used_ids: Vec<String> = Vec::new();
     for monitor in &switchable {
         let identity = &monitor.identity;
-        println!("---");
+        let previous = existing.as_ref().and_then(|c| find_configured(c, identity));
+
+        println!("\n---");
         println!("  {}", identity.describe());
         println!("  connection: {}", identity.backend_id);
         if let Ok(InputReading::Value(code)) = app.backend.read_input(&monitor.handle()) {
-            println!("  currently showing input: {}", InputReading::Value(code));
+            println!("  currently on: {}", InputReading::Value(code));
         }
 
-        // A display that is only ever cabled to one computer does not need
-        // managing, and configuring it would make every switch to the other
-        // computer refuse on its behalf. Skipping leaves it alone; `plan`
-        // still reports it as attached-but-not-configured.
-        if !ui::confirm("  Manage this display with desktop-switcher?")? {
-            println!("  Skipped. It will be left exactly as it is.");
+        if !ui::confirm("  Manage this monitor?")? {
+            println!("  Skipped.");
             continue;
         }
 
-        // With two identical panels the useful label is where they sit; with
-        // one, asking for a "physical position" is just puzzling.
-        let only_one = switchable.len() == 1;
-        let suggested = if only_one {
-            "main"
-        } else if used_ids.is_empty() {
-            "left"
-        } else {
-            "right"
-        };
-        let question = if only_one {
-            "  A short label for this display, used as `--monitor <label>`"
-        } else {
-            "  Where does this display physically sit (e.g. left, right)?"
-        };
-        let logical_id = loop {
-            let answer = ui::ask(question, Some(suggested))?;
-            if used_ids.contains(&answer) {
-                println!("  (`{answer}` is already used)");
-                continue;
-            }
-            break answer;
-        };
-        used_ids.push(logical_id.clone());
+        let suggested = previous
+            .map(|p| p.label.clone())
+            .unwrap_or_else(|| identity.describe());
+        let label = ui::ask("  A name for it", Some(&suggested))?;
 
-        // Carry forward anything already verified for this same panel.
-        // Re-running configure must not throw away a mapping that cost a real
-        // switch and a human watching it happen.
-        let previous = existing.as_ref().and_then(|c| {
-            c.monitors.iter().find(|m| {
-                (m.serial.is_some() && m.serial == identity.serial)
-                    || m.backend_id == identity.backend_id
-            })
-        });
-        let carried = previous.map(|p| p.destinations.clone()).unwrap_or_default();
-        for (destination, mapping) in &carried {
-            println!(
-                "  Keeping already-verified mapping: {destination} -> {} ({})",
-                mapping.input_code, mapping.verification
-            );
+        // Start from what the monitor advertises, keeping any labels the user
+        // already chose for those inputs.
+        let mut inputs: Vec<MonitorInput> = Vec::new();
+        match app.backend.input_capabilities(&monitor.handle()) {
+            Ok(caps) if !caps.options.is_empty() => {
+                for option in &caps.options {
+                    let kept = previous.and_then(|p| p.input(option.code));
+                    inputs.push(MonitorInput {
+                        input_code: option.code,
+                        label: kept
+                            .and_then(|k| k.label.clone())
+                            .or_else(|| option.label.clone()),
+                        verification: kept.map(|k| k.verification).unwrap_or(Evidence::Reported),
+                        note: kept.and_then(|k| k.note.clone()),
+                    });
+                }
+                println!("  Inputs it reports:");
+                for input in &inputs {
+                    println!("    {}  {}", input.input_code, input.display_name());
+                }
+                println!("  (a claim by the monitor — some listed inputs may not exist)");
+            }
+            _ => {
+                println!("  It reported no input list; codes can be added by hand later.");
+                if let Some(p) = previous {
+                    inputs = p.inputs.clone();
+                }
+            }
         }
 
-        let mut monitor_config = MonitorConfig {
-            logical_id: logical_id.clone(),
-            name: format!(
-                "{} {}",
-                identity.manufacturer.as_deref().unwrap_or("Display"),
-                identity.model.as_deref().unwrap_or("")
-            )
-            .trim()
-            .to_string(),
+        let key = identity
+            .serial
+            .clone()
+            .unwrap_or_else(|| identity.backend_id.clone());
+
+        config.monitors.push(MonitorConfig {
+            key,
+            label,
             backend_id: identity.backend_id.clone(),
             serial: identity.serial.clone(),
             model: identity.model.clone(),
-            destinations: carried,
-        };
-
-        // One mapping can always be established without writing anything:
-        // read the current input, and have the user say which computer that
-        // input is actually showing. It does not have to be this one --
-        // being told "that is the other computer" is just as good, and is the
-        // normal case when configuring from the machine that is idle.
-        match app.backend.read_input(&monitor.handle()) {
-            Ok(InputReading::Value(code)) => {
-                println!(
-                    "\n  This display currently reports input {}.",
-                    InputReading::Value(code)
-                );
-                let choice = ui::choose(
-                    "  Which computer is it actually showing right now?",
-                    &[
-                        format!("{self_destination} (this computer)"),
-                        format!("{other_destination} (the other computer)"),
-                        "Something else, or I cannot tell".to_string(),
-                    ],
-                )?;
-                match choice {
-                    0 | 1 => {
-                        let destination = if choice == 0 {
-                            self_destination.clone()
-                        } else {
-                            other_destination.clone()
-                        };
-                        monitor_config.destinations.insert(
-                            destination.clone(),
-                            DestinationMapping {
-                                input_code: code,
-                                verification: Evidence::UserConfirmed,
-                                verified_on: Some(eventlog::today()),
-                                note: Some(
-                                    "Read from the monitor while the user confirmed which computer it was displaying."
-                                        .into(),
-                                ),
-                            },
-                        );
-                        println!(
-                            "  Recorded: {destination} -> {code} (user-confirmed, no write needed)"
-                        );
-                    }
-                    _ => println!("  Nothing recorded for this display yet."),
-                }
-            }
-            Ok(other) => println!("\n  Could not read the current input: {other}"),
-            Err(e) => println!("\n  Could not read the current input: {e}"),
-        }
-
-        // Whatever is still missing can only come from a real switch.
-        let missing: Vec<String> = [&self_destination, &other_destination]
-            .into_iter()
-            .filter(|d| !monitor_config.destinations.contains_key(*d))
-            .cloned()
-            .collect();
-        for destination in &missing {
-            println!("\n  The input code for `{destination}` can only be established by switching");
-            println!("  this monitor and watching what happens. That is a separate, deliberate");
-            println!("  step:");
-            println!(
-                "    desktop-switcher test-input --monitor {logical_id} --code 0xNN --destination {destination}"
-            );
-        }
-        if let Ok(caps) = app.backend.input_capabilities(&monitor.handle()) {
-            if !caps.options.is_empty() {
-                let rendered: Vec<String> = caps.options.iter().map(|o| o.to_string()).collect();
-                println!("  This monitor claims to support: {}", rendered.join(", "));
-                println!("  (a claim, not proof — some listed inputs may not exist)");
-            }
-        }
-
-        config.monitors.push(monitor_config);
+            inputs,
+        });
     }
 
     if config.monitors.is_empty() {
-        bail!(
-            "No display was selected for management, so there is nothing to save. \
-             The existing configuration, if any, was left untouched."
-        );
+        bail!("No monitor was selected, so there is nothing to save.");
     }
 
-    config.validate()?;
+    // Drop actions that refer to a monitor skipped this time round, rather
+    // than saving a configuration that fails when a hotkey is pressed.
+    let monitors = config.monitors.clone();
+    config.actions.retain(|action| {
+        action.steps.iter().all(|s| match s.monitor_name() {
+            None => true,
+            Some(name) => name.is_empty() || monitors.iter().any(|m| m.matches(name)),
+        })
+    });
+
     config.save(&app.config_path)?;
     app.config = Some(config);
 
     println!("\nSaved to {}", app.config_path.display());
-    println!("\nNext: run `desktop-switcher doctor`, which lists exactly which");
-    println!("mappings are still missing, then use `test-input` to establish each");
-    println!("one. `switch` refuses to run until every mapping is user-confirmed.");
-    Ok(0)
-}
-
-// ---------------------------------------------------------------------------
-// test-input: the Stage B verification tool
-// ---------------------------------------------------------------------------
-
-pub fn test_input(
-    app: &mut App,
-    monitor_name: &str,
-    code_text: &str,
-    destination: Option<&str>,
-) -> Result<i32> {
-    let code: InputCode = code_text
-        .parse()
-        .map_err(|e| anyhow!("{e}"))
-        .context("parsing --code")?;
-
-    let detected = app.backend.discover().context("enumerating displays")?;
-    let target = resolve_detected(app, &detected, monitor_name)?.clone();
-    let handle = target.handle();
-
-    ui::heading("Single-monitor input test");
-    ui::field("monitor", target.identity.describe());
-    ui::field("connection", &target.identity.backend_id);
-    ui::field("about to write", format!("VCP 0x60 = {code}"));
-
-    match app.backend.input_capabilities(&handle) {
-        Ok(caps) => {
-            let rendered: Vec<String> = caps.options.iter().map(|o| o.to_string()).collect();
-            ui::field("monitor claims", rendered.join(", "));
-            if !caps.advertises(code) && !caps.options.is_empty() {
-                println!();
-                ui::warn(format!(
-                    "{code} is NOT in this monitor's advertised list. That can still be correct \
-                     (capability strings are often wrong), but it is more likely to do nothing \
-                     or blank the screen."
-                ));
-            }
-        }
-        Err(e) => ui::field("monitor claims", format!("unavailable: {e}")),
-    }
-
-    let before = app.backend.read_input(&handle);
-    match &before {
-        Ok(reading) => ui::field("current input", reading.to_string()),
-        Err(e) => ui::field("current input", format!("unavailable: {e}")),
-    }
-
-    println!("\nBefore continuing, make sure you can recover without this computer:");
-    ui::print_recovery_note();
-
-    println!();
-    if !ui::confirm(&format!(
-        "Write {code} to `{}` now?",
-        target.identity.describe()
-    ))? {
-        println!("Nothing was written.");
-        return Ok(0);
-    }
-
-    app.log.append(
-        "test-input.write",
-        &[
-            ("monitor", target.identity.backend_id.clone()),
-            ("code", code.to_string()),
-        ],
-    );
-
-    let outcome = app.backend.set_input(&handle, code).unwrap_or_else(|e| {
-        switcher_core::types::WriteOutcome::Failed {
-            detail: e.to_string(),
-        }
-    });
-    println!("\n  write outcome: {outcome}");
-
-    std::thread::sleep(Duration::from_millis(
-        app.config.as_ref().map(|c| c.settle_ms).unwrap_or(1200),
-    ));
-
-    match app.backend.read_input(&handle) {
-        Ok(reading) => println!("  read-back:     {reading}"),
-        Err(e) => println!("  read-back:     unavailable ({e})"),
-    }
-    println!(
-        "\n  A read-back that fails here is expected if the monitor switched to the\n  \
-         other computer: it stops answering this one."
-    );
-
-    // Only a human can settle what actually happened.
-    println!();
-    let observed = ui::choose(
-        "What is that monitor physically showing now?",
-        &[
-            "The other computer".to_string(),
-            "Still this computer, unchanged".to_string(),
-            "Nothing — blank or 'no signal'".to_string(),
-            "Something else".to_string(),
-        ],
-    )?;
-
-    match observed {
-        0 => println!("\n  Good: {code} selects the port the other computer is plugged into."),
-        1 => {
-            println!("\n  The write did not take effect. The monitor may not support this code,");
-            println!("  or it may map to a port with nothing attached.");
-            return Ok(1);
-        }
-        2 => {
-            println!("\n  {code} selects a port with no live source.");
-            println!("  Recover with the monitor's buttons, then try a different code.");
-            return Ok(1);
-        }
-        _ => {
-            println!("\n  Recording nothing, since the result is unclear.");
-            return Ok(1);
-        }
-    }
-
-    let Some(destination) = destination else {
-        println!("\n  Not recorded: pass --destination <name> to save this as a verified mapping.");
-        return Ok(0);
-    };
-
-    let Some(config) = app.config.as_mut() else {
-        println!("\n  Not recorded: there is no configuration yet. Run `configure` first.");
-        return Ok(0);
-    };
-
-    let Some(entry) = config.monitors.iter_mut().find(|m| {
-        (m.serial.is_some() && m.serial == target.identity.serial)
-            || m.backend_id == target.identity.backend_id
-    }) else {
-        println!(
-            "\n  Not recorded: this display is not in the configuration. Run `configure` first."
-        );
-        return Ok(0);
-    };
-
-    entry.destinations.insert(
-        destination.to_string(),
-        DestinationMapping {
-            input_code: code,
-            verification: Evidence::UserConfirmed,
-            verified_on: Some(eventlog::today()),
-            note: Some("Confirmed by watching the physical monitor switch.".into()),
-        },
-    );
-    let logical_id = entry.logical_id.clone();
-    let config = config.clone();
-    config.save(&app.config_path)?;
-
-    println!("\n  Recorded: {logical_id} -> {destination} = {code} (user-confirmed)");
-    println!("  Saved to {}", app.config_path.display());
-    println!("\n  That monitor is now on the other computer. To bring it back, run");
-    println!("  the switch command from that computer, or use the monitor's buttons.");
+    println!("\nNext: `desktop-switcher monitors` lists the inputs, and");
+    println!("`desktop-switcher set <monitor> 0xNN` changes one.");
     Ok(0)
 }
 
@@ -1189,59 +678,8 @@ fn require_config(app: &App) -> Result<&Config> {
     })
 }
 
-/// Resolve a user-supplied name to exactly one present display.
-///
-/// Accepts a configured logical id, a serial, or a backend id. Refuses rather
-/// than picking one when the name is ambiguous.
-fn resolve_detected<'a>(
-    app: &App,
-    detected: &'a [DetectedMonitor],
-    name: &str,
-) -> Result<&'a DetectedMonitor> {
-    // A configured logical id is resolved through the binding rules, so it
-    // gets the same serial corroboration a switch would.
-    if let Some(config) = &app.config {
-        if let Some(cfg) = config.monitor(name) {
-            let bindings = inventory::bind(config, detected);
-            if let Some(binding) = bindings.get(&cfg.logical_id) {
-                let id = binding.detected.identity.backend_id.clone();
-                return detected
-                    .iter()
-                    .find(|d| d.identity.backend_id == id)
-                    .ok_or_else(|| anyhow!("`{name}` vanished between discovery and binding"));
-            }
-            if let Some(problem) = bindings
-                .problems
-                .iter()
-                .find(|p| p.logical_id() == cfg.logical_id)
-            {
-                bail!("{problem}");
-            }
-        }
-    }
-
-    let matches: Vec<&DetectedMonitor> = detected
-        .iter()
-        .filter(|d| d.identity.backend_id == name || d.identity.serial.as_deref() == Some(name))
-        .collect();
-
-    match matches.as_slice() {
-        [one] => Ok(one),
-        [] => bail!(
-            "no display matches `{name}`. Run `desktop-switcher monitors` to see what is attached."
-        ),
-        many => bail!(
-            "`{name}` matches {} displays; refusing to guess which one you mean.",
-            many.len()
-        ),
-    }
-}
-
-/// This machine's hostname, used only for display and logs.
-///
-/// Deliberately not a prompt: it is not something anyone should have to
-/// invent, and asking for it right beside the switch names invited answering
-/// it with the *other* computer's name.
+/// This machine's hostname, used only for display. Never prompted for: it is
+/// not something anyone should have to invent.
 fn system_hostname() -> String {
     let from_env = if cfg!(windows) {
         std::env::var("COMPUTERNAME").ok()
@@ -1292,5 +730,11 @@ mod tests {
             textwrap("supercalifragilistic", 5),
             vec!["supercalifragilistic"]
         );
+    }
+
+    #[test]
+    fn keys_with_spaces_are_quoted_in_suggested_commands() {
+        assert_eq!(shell_quote("SN-1"), "SN-1");
+        assert_eq!(shell_quote("Left monitor"), "\"Left monitor\"");
     }
 }

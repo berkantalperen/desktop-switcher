@@ -113,10 +113,26 @@ pub struct SavedDisplayMode {
     pub bits_per_pixel: u32,
 }
 
+/// A window a sweep moved, and where it was before.
+///
+/// Identified by title rather than by window handle: a handle is only
+/// meaningful inside the process that read it, and sweep and restore are
+/// separate runs of the program. A title can be ambiguous or can change, so
+/// restoring is best-effort and says which windows it could not find.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovedWindow {
+    pub title: String,
+    /// Where it was before the sweep, in virtual-desktop coordinates.
+    pub from: Rect,
+    /// Whether it was maximized, so restoring can maximize it again.
+    #[serde(default)]
+    pub was_maximized: bool,
+}
+
 /// What a sweep actually moved.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepReport {
-    pub moved: Vec<String>,
+    pub moved: Vec<MovedWindow>,
     /// Windows found on the display that were deliberately left alone.
     pub skipped: Vec<String>,
 }
@@ -125,6 +141,15 @@ impl SweepReport {
     pub fn is_empty(&self) -> bool {
         self.moved.is_empty() && self.skipped.is_empty()
     }
+}
+
+/// What a restore managed to put back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    pub restored: Vec<String>,
+    /// Windows that could not be found again — closed, renamed, or opened on
+    /// another virtual desktop since the sweep.
+    pub missing: Vec<String>,
 }
 
 /// Operations on this computer's desktop.
@@ -139,6 +164,9 @@ pub trait DesktopManager {
 
     /// Move windows off `display` onto somewhere still visible.
     fn sweep_windows_off(&self, display: &DesktopDisplay) -> Result<SweepReport, DesktopError>;
+
+    /// Put previously swept windows back where they were.
+    fn restore_windows(&self, windows: &[MovedWindow]) -> Result<RestoreReport, DesktopError>;
 
     /// Make `display` the primary one.
     ///
@@ -172,6 +200,10 @@ impl DesktopManager for NoopDesktop {
 
     fn sweep_windows_off(&self, _display: &DesktopDisplay) -> Result<SweepReport, DesktopError> {
         Ok(SweepReport::default())
+    }
+
+    fn restore_windows(&self, _windows: &[MovedWindow]) -> Result<RestoreReport, DesktopError> {
+        Ok(RestoreReport::default())
     }
 
     fn set_primary(&self, _display: &DesktopDisplay) -> Result<(), DesktopError> {

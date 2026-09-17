@@ -1,10 +1,12 @@
-//! A small editor for the things that are tedious to configure by hand:
-//! what each layer does on a switch, and the named actions bound to hotkeys.
+//! A small editor and launcher for the switcher.
 //!
-//! It deliberately owns no logic of its own. Everything it *does* — switching,
-//! sweeping, running an action — it does by invoking the CLI, so there is one
-//! implementation of the rules and the GUI cannot drift away from it or
-//! bypass a safety check. What it owns is the configuration file.
+//! It owns no logic of its own. Everything it *does* it does by invoking the
+//! CLI, so there is one implementation of the rules and the GUI cannot drift
+//! from it or bypass a safety check. What it owns is the configuration file.
+//!
+//! Like the rest of the project, it knows about monitors and inputs and
+//! nothing else. Which computer is on which input is the user's business, and
+//! the place they record it is the name they give an action.
 
 // Release builds have no console; debug builds keep one so panics are visible.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -14,13 +16,14 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui;
 use switcher_core::actions::{Action, ActionStep};
-use switcher_core::config::{self, AwayAction, Config, HomeAction};
+use switcher_core::config::{self, Config, MonitorInput};
+use switcher_core::types::InputCode;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 620.0])
-            .with_min_inner_size([560.0, 420.0])
+            .with_inner_size([820.0, 640.0])
+            .with_min_inner_size([600.0, 440.0])
             .with_title("Desktop Switcher"),
         ..Default::default()
     };
@@ -33,9 +36,9 @@ fn main() -> eframe::Result<()> {
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
-    Switch,
-    Layers,
+    Monitors,
     Actions,
+    Settings,
 }
 
 /// The result of a CLI invocation, delivered back to the UI thread.
@@ -48,7 +51,6 @@ struct CommandResult {
 struct SwitcherApp {
     config_path: PathBuf,
     config: Option<Config>,
-    /// Why the configuration could not be loaded, if it could not.
     load_error: Option<String>,
     cli: Option<PathBuf>,
     tab: Tab,
@@ -73,7 +75,7 @@ impl SwitcherApp {
             config,
             load_error,
             cli: find_cli(),
-            tab: Tab::Switch,
+            tab: Tab::Monitors,
             dirty: false,
             status: String::new(),
             output: String::new(),
@@ -129,8 +131,8 @@ impl SwitcherApp {
                 self.dirty = false;
                 self.status = format!("Saved to {}", self.config_path.display());
             }
-            // Validation runs inside save, so this is where a duplicate
-            // hotkey or an empty action gets reported.
+            // Validation runs inside save, so a duplicate hotkey or an action
+            // naming a monitor that no longer exists is reported here.
             Err(e) => self.status = format!("Not saved: {e}"),
         }
     }
@@ -191,9 +193,9 @@ impl eframe::App for SwitcherApp {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Switch, "Switch");
-                ui.selectable_value(&mut self.tab, Tab::Layers, "Layers");
+                ui.selectable_value(&mut self.tab, Tab::Monitors, "Monitors");
                 ui.selectable_value(&mut self.tab, Tab::Actions, "Actions");
+                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
                 ui.separator();
                 if ui.button("Reload").clicked() {
                     self.reload();
@@ -213,7 +215,7 @@ impl eframe::App for SwitcherApp {
         });
 
         egui::TopBottomPanel::bottom("status")
-            .min_height(120.0)
+            .min_height(110.0)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -225,7 +227,7 @@ impl eframe::App for SwitcherApp {
                 if !self.output.is_empty() {
                     ui.separator();
                     egui::ScrollArea::vertical()
-                        .max_height(160.0)
+                        .max_height(150.0)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.monospace(&self.output);
@@ -239,9 +241,9 @@ impl eframe::App for SwitcherApp {
                 return;
             }
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
-                Tab::Switch => self.show_switch(ui),
-                Tab::Layers => self.show_layers(ui),
+                Tab::Monitors => self.show_monitors(ui),
                 Tab::Actions => self.show_actions(ui),
+                Tab::Settings => self.show_settings(ui),
             });
         });
     }
@@ -252,9 +254,8 @@ impl SwitcherApp {
         ui.heading("No configuration yet");
         ui.add_space(8.0);
         ui.label(
-            "This editor changes an existing configuration; it does not identify \
-             monitors or verify input codes. Those need a human watching the screens, \
-             so they live in the command line.",
+            "This editor changes an existing configuration. Discovering which monitors \
+             exist and what inputs they offer happens in the command line:",
         );
         ui.add_space(8.0);
         ui.monospace("desktop-switcher configure");
@@ -269,67 +270,119 @@ impl SwitcherApp {
         }
     }
 
-    fn show_switch(&mut self, ui: &mut egui::Ui) {
-        let Some(config) = &self.config else { return };
-        let destinations = config.destinations();
-        let self_destination = config.self_destination.clone();
-        let monitors: Vec<String> = config
-            .monitors
-            .iter()
-            .map(|m| m.logical_id.clone())
-            .collect();
-
-        ui.heading("Layer 1 — which computer the monitors show");
-        ui.add_space(6.0);
+    fn show_monitors(&mut self, ui: &mut egui::Ui) {
         let mut pending: Vec<(String, Vec<String>)> = Vec::new();
-        ui.horizontal_wrapped(|ui| {
-            for destination in &destinations {
-                let label = if *destination == self_destination {
-                    format!("Bring here ({destination})")
-                } else {
-                    format!("Send to {destination}")
-                };
-                if ui.button(label).clicked() {
-                    pending.push((
-                        format!("switch {destination}"),
-                        vec!["switch".into(), destination.clone()],
-                    ));
-                }
-            }
-        });
+        let mut dirty = false;
 
-        ui.add_space(14.0);
-        ui.heading("Layer 2 — this computer's desktop");
-        ui.label(
-            "Both computers can have a monitor attached at once, which is why a window \
-             can strand on a screen showing the other machine. Sweeping moves those \
-             windows back without changing anything about the display layout.",
-        );
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            if monitors.is_empty() {
-                if ui.button("Sweep windows off").clicked() {
-                    pending.push(("sweep".into(), vec!["sweep".into()]));
-                }
-            } else {
-                for monitor in &monitors {
-                    if ui.button(format!("Sweep windows off {monitor}")).clicked() {
-                        pending.push((
-                            format!("sweep {monitor}"),
-                            vec!["sweep".into(), monitor.clone()],
-                        ));
+        ui.heading("Monitors");
+        ui.label("Click an input to switch that monitor to it.");
+        ui.add_space(8.0);
+
+        {
+            let Some(config) = &mut self.config else {
+                return;
+            };
+            if config.monitors.is_empty() {
+                ui.label("No monitors are configured. Run `desktop-switcher configure`.");
+                return;
+            }
+
+            for (index, monitor) in config.monitors.iter_mut().enumerate() {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&monitor.label).strong());
+                        ui.label(
+                            egui::RichText::new(format!("· {}", monitor.key))
+                                .weak()
+                                .small(),
+                        );
+                    });
+
+                    if monitor.inputs.is_empty() {
+                        ui.label("No inputs recorded. Re-run `configure`.");
+                    } else {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for input in &monitor.inputs {
+                                let text =
+                                    format!("{}  ({})", input.display_name(), input.input_code);
+                                if ui.button(text).clicked() {
+                                    pending.push((
+                                        format!("set {} {}", monitor.key, input.input_code),
+                                        vec![
+                                            "set".into(),
+                                            monitor.key.clone(),
+                                            input.input_code.to_string(),
+                                        ],
+                                    ));
+                                }
+                            }
+                        });
                     }
-                }
-            }
-        });
 
-        ui.add_space(14.0);
-        ui.heading("Look, don't touch");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Sweep windows off")
+                            .on_hover_text(
+                                "Move windows off this monitor without changing the display layout",
+                            )
+                            .clicked()
+                        {
+                            pending.push((
+                                format!("sweep {}", monitor.key),
+                                vec!["sweep".into(), monitor.key.clone()],
+                            ));
+                        }
+                        if ui
+                            .button("Restore windows")
+                            .on_hover_text("Put swept windows back where they were")
+                            .clicked()
+                        {
+                            pending.push((
+                                format!("restore {}", monitor.key),
+                                vec!["restore-windows".into(), monitor.key.clone()],
+                            ));
+                        }
+                    });
+
+                    // Renaming lives here rather than in a settings screen:
+                    // it is the one place the person can say what an input
+                    // actually is to them.
+                    ui.add_space(4.0);
+                    egui::CollapsingHeader::new("Rename")
+                        .id_salt(index)
+                        .show(ui, |ui| {
+                            egui::Grid::new(format!("names{index}"))
+                                .num_columns(2)
+                                .spacing([8.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label("Monitor");
+                                    dirty |= ui.text_edit_singleline(&mut monitor.label).changed();
+                                    ui.end_row();
+                                    for input in monitor.inputs.iter_mut() {
+                                        ui.label(input.input_code.to_string());
+                                        let mut name = input.label.clone().unwrap_or_default();
+                                        if ui.text_edit_singleline(&mut name).changed() {
+                                            input.label =
+                                                (!name.trim().is_empty()).then(|| name.clone());
+                                            dirty = true;
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
+                ui.add_space(6.0);
+            }
+        }
+
+        ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             for (label, arg) in [
                 ("Status", "status"),
+                ("Re-read hardware", "monitors"),
                 ("Displays", "displays"),
-                ("Monitors", "monitors"),
                 ("Doctor", "doctor"),
             ] {
                 if ui.button(label).clicked() {
@@ -337,84 +390,100 @@ impl SwitcherApp {
                 }
             }
         });
+        ui.small(
+            "Adding or removing a monitor needs `desktop-switcher configure`, which reads \
+             the inputs from the hardware.",
+        );
 
+        if dirty {
+            self.dirty = true;
+        }
         for (label, args) in pending {
             self.run_cli(&label, args);
         }
     }
 
-    fn show_layers(&mut self, ui: &mut egui::Ui) {
+    fn show_settings(&mut self, ui: &mut egui::Ui) {
         let Some(config) = &mut self.config else {
             return;
         };
-        ui.heading("What a plain switch should also do");
-        ui.label(
-            "These are off by default, so `switch` only changes the monitor input. \
-             An action can still do more without changing this.",
-        );
-        ui.add_space(10.0);
+        let mut dirty = false;
 
-        ui.label("When a monitor is sent to the other computer:");
-        let before = config.on_switch;
-        ui.radio_value(
-            &mut config.on_switch.away,
-            AwayAction::Nothing,
-            "Nothing — fastest, and windows on it become unreachable",
-        );
-        ui.radio_value(
-            &mut config.on_switch.away,
-            AwayAction::Sweep,
-            "Sweep — move windows off it, leave it attached",
-        );
-        ui.radio_value(
-            &mut config.on_switch.away,
-            AwayAction::Release,
-            "Release — detach it from this desktop (experimental, needs --experimental)",
-        );
+        ui.heading("Settings");
+        ui.add_space(8.0);
+        egui::Grid::new("settings")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Settle delay (ms)");
+                dirty |= ui
+                    .add(egui::DragValue::new(&mut config.settle_ms).range(0..=5000))
+                    .on_hover_text(
+                        "How long to wait after a write before reading the input back. \
+                         Too short and the monitor has not settled; too long and a hotkey \
+                         feels slow.",
+                    )
+                    .changed();
+                ui.end_row();
 
-        ui.add_space(12.0);
-        ui.label("When a monitor comes back to this computer:");
-        ui.radio_value(&mut config.on_switch.home, HomeAction::Nothing, "Nothing");
-        ui.radio_value(
-            &mut config.on_switch.home,
-            HomeAction::Claim,
-            "Claim — reattach it if this computer had released it (experimental)",
-        );
+                ui.label("Ignore repeats within (ms)");
+                dirty |= ui
+                    .add(egui::DragValue::new(&mut config.dedupe_ms).range(0..=10000))
+                    .on_hover_text(
+                        "A held hotkey would otherwise issue a burst of writes. Zero \
+                         disables the guard.",
+                    )
+                    .changed();
+                ui.end_row();
 
-        if config.on_switch != before {
-            self.dirty = true;
-        }
+                ui.label("Command timeout (s)");
+                dirty |= ui
+                    .add(egui::DragValue::new(&mut config.timeout_seconds).range(1..=120))
+                    .changed();
+                ui.end_row();
+            });
 
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(6.0);
+        ui.label(egui::RichText::new("Configuration file").strong());
+        ui.monospace(self.config_path.display().to_string());
+        ui.small(format!(
+            "Host: {} · backend: {:?}",
+            config.host, config.backend
+        ));
+
+        ui.add_space(14.0);
         ui.label(
             egui::RichText::new(
-                "Release and Claim change the Windows display topology and are not reliable \
-                 yet — they have left monitors mirrored instead of extended. They refuse to \
-                 run unless --experimental is passed. Sweep solves the same problem safely.",
+                "Release, Claim and Make-primary change the Windows display topology and \
+                 are not reliable yet — they have left monitors mirrored instead of \
+                 extended. They refuse to run unless --experimental is passed. Sweep and \
+                 Restore windows solve the same problem safely.",
             )
             .color(egui::Color32::from_rgb(200, 150, 60)),
         );
+
+        if dirty {
+            self.dirty = true;
+        }
     }
 
     fn show_actions(&mut self, ui: &mut egui::Ui) {
-        let (destinations, monitors) = {
+        // Monitors and their inputs, so a step can be picked rather than typed.
+        let monitors: Vec<(String, String, Vec<MonitorInput>)> = {
             let Some(config) = &self.config else { return };
-            (
-                config.destinations(),
-                config
-                    .monitors
-                    .iter()
-                    .map(|m| m.logical_id.clone())
-                    .collect::<Vec<_>>(),
-            )
+            config
+                .monitors
+                .iter()
+                .map(|m| (m.key.clone(), m.label.clone(), m.inputs.clone()))
+                .collect()
         };
 
         ui.heading("Actions");
         ui.label(
             "A named sequence of steps, optionally bound to a hotkey. Steps run in order \
-             and stop at the first failure.",
+             and stop at the first failure. Name them however you think of them.",
         );
         ui.add_space(8.0);
 
@@ -433,7 +502,7 @@ impl SwitcherApp {
                 action.name.clone()
             };
             egui::CollapsingHeader::new(header)
-                .id_salt(index)
+                .id_salt(1000 + index)
                 .default_open(true)
                 .show(ui, |ui| {
                     egui::Grid::new(format!("meta{index}"))
@@ -452,17 +521,14 @@ impl SwitcherApp {
                             }
                             ui.end_row();
                         });
-                    ui.small(
-                        "Hotkey looks like CTRL+ALT+2. Leave it empty to keep the action unbound.",
-                    );
+                    ui.small("Hotkey looks like CTRL+ALT+2. Leave it empty to keep it unbound.");
 
                     ui.add_space(6.0);
                     ui.label("Steps:");
                     let mut remove_step: Option<usize> = None;
                     for (step_index, step) in action.steps.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            dirty |=
-                                step_editor(ui, index, step_index, step, &destinations, &monitors);
+                            dirty |= step_editor(ui, index, step_index, step, &monitors);
                             if ui.button("✕").on_hover_text("Remove this step").clicked() {
                                 remove_step = Some(step_index);
                             }
@@ -474,16 +540,20 @@ impl SwitcherApp {
                     }
 
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("+ Switch").clicked() {
-                            action.steps.push(ActionStep::Switch {
-                                destination: destinations.first().cloned().unwrap_or_default(),
-                            });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("+ Set input").clicked() {
+                            action.steps.push(default_set_input(&monitors));
                             dirty = true;
                         }
                         if ui.button("+ Sweep").clicked() {
                             action.steps.push(ActionStep::Sweep {
-                                monitor: monitors.first().cloned(),
+                                monitor: monitors.first().map(|m| m.0.clone()),
+                            });
+                            dirty = true;
+                        }
+                        if ui.button("+ Restore windows").clicked() {
+                            action.steps.push(ActionStep::RestoreWindows {
+                                monitor: monitors.first().map(|m| m.0.clone()),
                             });
                             dirty = true;
                         }
@@ -523,11 +593,7 @@ impl SwitcherApp {
         ui.add_space(8.0);
         if ui.button("+ New action").clicked() {
             let mut action = Action::new(format!("Action {}", config.actions.len() + 1));
-            if let Some(first) = destinations.first() {
-                action.steps.push(ActionStep::Switch {
-                    destination: first.clone(),
-                });
-            }
+            action.steps.push(default_set_input(&monitors));
             config.actions.push(action);
             dirty = true;
         }
@@ -552,14 +618,26 @@ impl SwitcherApp {
     }
 }
 
+type MonitorChoice = (String, String, Vec<MonitorInput>);
+
+fn default_set_input(monitors: &[MonitorChoice]) -> ActionStep {
+    let (key, _, inputs) = monitors.first().cloned().unwrap_or_default();
+    ActionStep::SetInput {
+        monitor: key,
+        code: inputs
+            .first()
+            .map(|i| i.input_code)
+            .unwrap_or(InputCode(0x11)),
+    }
+}
+
 /// One step's editor. Returns whether anything changed.
 fn step_editor(
     ui: &mut egui::Ui,
     action_index: usize,
     step_index: usize,
     step: &mut ActionStep,
-    destinations: &[String],
-    monitors: &[String],
+    monitors: &[MonitorChoice],
 ) -> bool {
     let mut changed = false;
     let id = format!("step{action_index}-{step_index}");
@@ -572,8 +650,9 @@ fn step_editor(
         .width(150.0)
         .show_ui(ui, |ui| {
             for option in [
-                StepKind::Switch,
+                StepKind::SetInput,
                 StepKind::Sweep,
+                StepKind::RestoreWindows,
                 StepKind::Run,
                 StepKind::Release,
                 StepKind::Claim,
@@ -588,40 +667,67 @@ fn step_editor(
             }
         });
     if kind != step_kind(step) {
-        *step = default_step(kind, destinations, monitors);
+        *step = default_step(kind, monitors);
         changed = true;
     }
 
     match step {
-        ActionStep::Switch { destination } => {
-            if destinations.is_empty() {
-                changed |= ui.text_edit_singleline(destination).changed();
-            } else {
-                egui::ComboBox::from_id_salt(format!("{id}-dest"))
-                    .selected_text(destination.clone())
-                    .show_ui(ui, |ui| {
-                        for option in destinations {
-                            if ui
-                                .selectable_value(destination, option.clone(), option)
-                                .clicked()
-                            {
-                                changed = true;
-                            }
+        ActionStep::SetInput { monitor, code } => {
+            let label_for = |key: &str| {
+                monitors
+                    .iter()
+                    .find(|(k, _, _)| k == key)
+                    .map(|(_, l, _)| l.clone())
+                    .unwrap_or_else(|| key.to_string())
+            };
+            egui::ComboBox::from_id_salt(format!("{id}-mon"))
+                .selected_text(label_for(monitor))
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for (key, label, _) in monitors {
+                        if ui.selectable_value(monitor, key.clone(), label).clicked() {
+                            changed = true;
                         }
-                    });
-            }
+                    }
+                });
+
+            let inputs = monitors
+                .iter()
+                .find(|(k, _, _)| k == monitor)
+                .map(|(_, _, i)| i.clone())
+                .unwrap_or_default();
+            let current = inputs
+                .iter()
+                .find(|i| i.input_code == *code)
+                .map(|i| format!("{}  ({})", i.display_name(), i.input_code))
+                .unwrap_or_else(|| code.to_string());
+
+            egui::ComboBox::from_id_salt(format!("{id}-code"))
+                .selected_text(current)
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for input in &inputs {
+                        let text = format!("{}  ({})", input.display_name(), input.input_code);
+                        if ui.selectable_value(code, input.input_code, text).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
         }
         ActionStep::Sweep { monitor }
+        | ActionStep::RestoreWindows { monitor }
         | ActionStep::Release { monitor }
         | ActionStep::Claim { monitor }
         | ActionStep::Primary { monitor } => {
             let mut selected = monitor.clone().unwrap_or_default();
+            let shown = monitors
+                .iter()
+                .find(|(k, _, _)| *k == selected)
+                .map(|(_, l, _)| l.clone())
+                .unwrap_or_else(|| "(the only monitor)".to_string());
             egui::ComboBox::from_id_salt(format!("{id}-mon"))
-                .selected_text(if selected.is_empty() {
-                    "(the only monitor)".to_string()
-                } else {
-                    selected.clone()
-                })
+                .selected_text(shown)
+                .width(220.0)
                 .show_ui(ui, |ui| {
                     if ui
                         .selectable_value(&mut selected, String::new(), "(the only monitor)")
@@ -629,9 +735,9 @@ fn step_editor(
                     {
                         changed = true;
                     }
-                    for option in monitors {
+                    for (key, label, _) in monitors {
                         if ui
-                            .selectable_value(&mut selected, option.clone(), option)
+                            .selectable_value(&mut selected, key.clone(), label)
                             .clicked()
                         {
                             changed = true;
@@ -652,7 +758,7 @@ fn step_editor(
             ui.label("args");
             let mut joined = args.join(" ");
             if ui
-                .add(egui::TextEdit::singleline(&mut joined).desired_width(160.0))
+                .add(egui::TextEdit::singleline(&mut joined).desired_width(150.0))
                 .changed()
             {
                 // Split on whitespace: arguments are passed as a list, never
@@ -667,8 +773,9 @@ fn step_editor(
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum StepKind {
-    Switch,
+    SetInput,
     Sweep,
+    RestoreWindows,
     Release,
     Claim,
     Primary,
@@ -677,8 +784,9 @@ enum StepKind {
 
 fn step_kind(step: &ActionStep) -> StepKind {
     match step {
-        ActionStep::Switch { .. } => StepKind::Switch,
+        ActionStep::SetInput { .. } => StepKind::SetInput,
         ActionStep::Sweep { .. } => StepKind::Sweep,
+        ActionStep::RestoreWindows { .. } => StepKind::RestoreWindows,
         ActionStep::Release { .. } => StepKind::Release,
         ActionStep::Claim { .. } => StepKind::Claim,
         ActionStep::Primary { .. } => StepKind::Primary,
@@ -688,8 +796,9 @@ fn step_kind(step: &ActionStep) -> StepKind {
 
 fn kind_label(kind: StepKind) -> &'static str {
     match kind {
-        StepKind::Switch => "Switch input",
+        StepKind::SetInput => "Set input",
         StepKind::Sweep => "Sweep windows",
+        StepKind::RestoreWindows => "Restore windows",
         StepKind::Release => "Release (exp.)",
         StepKind::Claim => "Claim (exp.)",
         StepKind::Primary => "Make primary (exp.)",
@@ -697,13 +806,12 @@ fn kind_label(kind: StepKind) -> &'static str {
     }
 }
 
-fn default_step(kind: StepKind, destinations: &[String], monitors: &[String]) -> ActionStep {
-    let monitor = monitors.first().cloned();
+fn default_step(kind: StepKind, monitors: &[MonitorChoice]) -> ActionStep {
+    let monitor = monitors.first().map(|m| m.0.clone());
     match kind {
-        StepKind::Switch => ActionStep::Switch {
-            destination: destinations.first().cloned().unwrap_or_default(),
-        },
+        StepKind::SetInput => default_set_input(monitors),
         StepKind::Sweep => ActionStep::Sweep { monitor },
+        StepKind::RestoreWindows => ActionStep::RestoreWindows { monitor },
         StepKind::Release => ActionStep::Release { monitor },
         StepKind::Claim => ActionStep::Claim { monitor },
         StepKind::Primary => ActionStep::Primary { monitor },

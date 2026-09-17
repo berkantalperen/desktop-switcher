@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-    Create Start Menu shortcuts with global hotkeys for desktop-switcher.
+    Bind your configured actions to global hotkeys.
 
 .DESCRIPTION
-    Windows only honours a shortcut's hotkey when the shortcut lives in the
-    Start Menu or on the Desktop, so they go in the Start Menu.
+    Reads the actions out of your configuration and creates one Start Menu
+    shortcut per action that has a hotkey. Windows only honours a shortcut's
+    hotkey when the shortcut lives in the Start Menu or on the Desktop, which
+    is why they go there.
 
-    Two explicit shortcuts are created, one per destination. `toggle` is
-    deliberately not bound: after someone changes an input with the monitor's
-    own buttons, a toggle has to guess what "the other one" means, and this
-    tool refuses to guess rather than switching to the wrong computer.
+    Actions are named by you, so this script invents no names of its own and
+    assumes nothing about what is plugged into which input.
 
     Nothing here needs elevation, and uninstalling is deleting the .lnk files.
 
@@ -18,13 +18,11 @@
 
 .EXAMPLE
     .\install-windows-shortcuts.ps1
-    .\install-windows-shortcuts.ps1 -Exe C:\tools\desktop-switcher.exe
+    .\install-windows-shortcuts.ps1 -Uninstall
 #>
 [CmdletBinding()]
 param(
     [string] $Exe,
-    [string] $ToWindowsHotkey = 'CTRL+ALT+1',
-    [string] $ToUbuntuHotkey  = 'CTRL+ALT+2',
     [switch] $Uninstall
 )
 
@@ -34,8 +32,10 @@ $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Deskt
 
 if ($Uninstall) {
     if (Test-Path $startMenu) {
-        Remove-Item $startMenu -Recurse -Force
-        Write-Host "Removed $startMenu"
+        # Leave any GUI shortcut alone; only the hotkey ones are ours to remove.
+        Get-ChildItem $startMenu -Filter '*.lnk' |
+            Where-Object { $_.BaseName -ne 'Desktop Switcher' } |
+            ForEach-Object { Remove-Item $_.FullName -Force; Write-Host "Removed $($_.BaseName)" }
     } else {
         Write-Host "Nothing to remove."
     }
@@ -51,43 +51,58 @@ if (-not $Exe) {
 }
 if (-not (Test-Path $Exe)) { throw "No such file: $Exe" }
 
-# Resolve the destination names from the configuration rather than assuming
-# them, since they are whatever was chosen during `configure`.
 $configPath = Join-Path $env:APPDATA 'desktop-switcher\config\config.toml'
 if (-not (Test-Path $configPath)) {
-    throw "No configuration at $configPath. Run `desktop-switcher configure` first."
-}
-$destinations = Select-String -Path $configPath -Pattern '^\[monitors\.destinations\.(.+)\]$' |
-    ForEach-Object { $_.Matches[0].Groups[1].Value } |
-    Sort-Object -Unique
-if ($destinations.Count -lt 2) {
-    throw "Expected two destinations in the configuration, found: $($destinations -join ', ')"
+    throw "No configuration at $configPath. Run ``desktop-switcher configure`` first."
 }
 
-$self = (Select-String -Path $configPath -Pattern '^self_destination\s*=\s*"(.+)"$').Matches[0].Groups[1].Value
-$other = $destinations | Where-Object { $_ -ne $self } | Select-Object -First 1
+# Walk the [[actions]] blocks, pairing each name with its hotkey. Only actions
+# that have a hotkey get a shortcut; the rest are run from the GUI or the
+# command line.
+$actions = @()
+$current = $null
+foreach ($line in Get-Content $configPath) {
+    if ($line -match '^\s*\[\[actions\]\]\s*$') {
+        if ($current -and $current.Name -and $current.Hotkey) { $actions += $current }
+        $current = [pscustomobject]@{ Name = $null; Hotkey = $null }
+        continue
+    }
+    if ($line -match '^\s*\[\[?[a-z]' -and $line -notmatch '^\s*\[\[actions\.steps\]\]') {
+        # Any other top-level table ends the actions section.
+        if ($current -and $current.Name -and $current.Hotkey) { $actions += $current; $current = $null }
+    }
+    if (-not $current) { continue }
+    if ($line -match '^\s*name\s*=\s*"(.*)"\s*$')   { $current.Name   = $Matches[1] }
+    if ($line -match '^\s*hotkey\s*=\s*"(.*)"\s*$') { $current.Hotkey = $Matches[1] }
+}
+if ($current -and $current.Name -and $current.Hotkey) { $actions += $current }
+
+if ($actions.Count -eq 0) {
+    Write-Host "No action has a hotkey yet."
+    Write-Host "Add one in the GUI (Actions tab), save, then run this again."
+    return
+}
 
 New-Item -ItemType Directory -Force -Path $startMenu | Out-Null
 $shell = New-Object -ComObject WScript.Shell
 
-function New-SwitcherShortcut {
-    param([string] $Name, [string] $Destination, [string] $Hotkey)
+foreach ($action in $actions) {
+    # A shortcut filename cannot contain the characters an action name may.
+    $safe = ($action.Name -replace '[\\/:*?"<>|]', '-').Trim()
+    $path = Join-Path $startMenu "$safe.lnk"
 
-    $path = Join-Path $startMenu "$Name.lnk"
     $lnk = $shell.CreateShortcut($path)
     $lnk.TargetPath = $Exe
-    $lnk.Arguments = "switch $Destination"
+    $lnk.Arguments = "run-action `"$($action.Name)`""
     $lnk.WorkingDirectory = Split-Path $Exe
-    $lnk.Description = "Point the monitors at $Destination"
-    $lnk.Hotkey = $Hotkey
+    $lnk.Description = "Run the `"$($action.Name)`" action"
+    $lnk.Hotkey = $action.Hotkey
     # Hotkey-launched shortcuts flash a console window otherwise.
     $lnk.WindowStyle = 7
     $lnk.Save()
-    Write-Host ("{0,-28} {1,-14} -> switch {2}" -f $Name, $Hotkey, $Destination)
-}
 
-New-SwitcherShortcut -Name "Monitors to $self"  -Destination $self  -Hotkey $ToWindowsHotkey
-New-SwitcherShortcut -Name "Monitors to $other" -Destination $other -Hotkey $ToUbuntuHotkey
+    Write-Host ("{0,-32} {1,-16} -> run-action" -f $action.Name, $action.Hotkey)
+}
 
 Write-Host ""
 Write-Host "Installed in: $startMenu"

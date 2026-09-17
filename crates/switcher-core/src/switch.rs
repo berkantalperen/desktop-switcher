@@ -1,10 +1,14 @@
-//! The switch transaction: validate, then write, then report honestly.
+//! Setting a monitor's input, and reporting honestly what happened.
 //!
-//! Two rules drive the shape of this module.
+//! The unit of work is **one monitor, one input code**. That is the only
+//! thing the hardware offers, and it is all this layer believes in. Grouping
+//! several of them into "the desk setup" is a person's idea and belongs in an
+//! action, not here.
 //!
-//! 1. A switch is a *set-target* operation. Every write is an absolute input
-//!    code for a named destination, so issuing it twice is harmless. Nothing
-//!    here ever increments or cycles VCP 0x60.
+//! Two rules shape the rest:
+//!
+//! 1. A set is absolute, never a step or a cycle. Issuing it twice is
+//!    harmless, so a repeated hotkey cannot walk a monitor through its inputs.
 //! 2. A zero exit status is not a switched monitor. The report distinguishes
 //!    "confirmed by read", "issued but unconfirmed", and "failed", and never
 //!    rounds the middle one up.
@@ -23,119 +27,68 @@ use crate::types::{DetectedMonitor, InputCode, InputReading, MonitorHandle, Writ
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
-    #[error("unknown destination `{requested}`. Configured destinations: {}", known.join(", "))]
-    UnknownDestination {
+    #[error("no monitors are configured. Run `desktop-switcher configure` first.")]
+    NoMonitorsConfigured,
+    #[error("`{requested}` is not a configured monitor. Configured: {}", known.join(", "))]
+    UnknownMonitor {
         requested: String,
         known: Vec<String>,
     },
-    #[error("no monitors are configured. Run `desktop-switcher configure` first.")]
-    NoMonitorsConfigured,
-    #[error("cannot identify every configured monitor:\n{}",
-            problems.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n"))]
-    Binding { problems: Vec<BindingProblem> },
-    #[error("`{logical_id}` has no input code recorded for `{destination}`. Run `desktop-switcher configure`, or test one monitor with `desktop-switcher inspect`.")]
-    MissingMapping {
-        logical_id: String,
-        destination: String,
-    },
-    #[error("`{logical_id}` -> `{destination}` is only {evidence}, not user-confirmed. Verify it with a human watching before switching unattended.")]
-    UntrustedMapping {
-        logical_id: String,
-        destination: String,
-        evidence: String,
-    },
+    #[error("cannot identify `{}`: {problem}", problem.monitor())]
+    Binding { problem: BindingProblem },
 }
 
-/// One write this switch intends to make.
+/// One monitor about to be set to one input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedWrite {
-    pub logical_id: String,
-    pub name: String,
+pub struct PlannedSet {
+    /// The monitor's configured key.
+    pub key: String,
+    /// Its human label, for reporting.
+    pub label: String,
     pub handle: MonitorHandle,
     pub code: InputCode,
+    /// Whether the monitor advertises this input. Advisory: capability
+    /// strings are routinely wrong in both directions, so an unadvertised
+    /// code is worth a warning and not a refusal.
+    pub advertised: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchPlan {
-    pub destination: String,
-    /// True when the destination is another computer, so losing DDC contact
-    /// after the write is the expected outcome rather than a fault.
-    pub switching_away: bool,
-    pub writes: Vec<PlannedWrite>,
-    pub notes: Vec<String>,
-}
-
-/// Validate a requested destination into a concrete, fully-identified plan.
-///
-/// Every refusal here is a refusal to write. Nothing is attempted partially
-/// because one monitor checked out.
-pub fn plan(
+/// Resolve "set this monitor to this input" against what is actually attached.
+pub fn plan_set_input(
     config: &Config,
     detected: &[DetectedMonitor],
-    destination: &str,
-) -> Result<SwitchPlan, PlanError> {
+    monitor_name: &str,
+    code: InputCode,
+) -> Result<PlannedSet, PlanError> {
     if config.monitors.is_empty() {
         return Err(PlanError::NoMonitorsConfigured);
     }
-    let known = config.destinations();
-    if !known.iter().any(|d| d == destination) {
-        return Err(PlanError::UnknownDestination {
-            requested: destination.to_string(),
-            known,
+    let Some(cfg) = config.monitor(monitor_name) else {
+        return Err(PlanError::UnknownMonitor {
+            requested: monitor_name.to_string(),
+            known: config.monitors.iter().map(|m| m.key.clone()).collect(),
         });
-    }
+    };
 
     let bindings = bind(config, detected);
-    if !bindings.is_complete() {
-        return Err(PlanError::Binding {
-            problems: bindings.problems,
-        });
-    }
-
-    let mut notes: Vec<String> = bindings
-        .bound
+    if let Some(problem) = bindings
+        .problems
         .iter()
-        .flat_map(|b| b.notes.clone())
-        .collect();
-    for extra in &bindings.unclaimed {
-        notes.push(format!(
-            "{} is attached but not configured; it will not be switched.",
-            extra.identity.describe()
-        ));
+        .find(|p| p.monitor() == cfg.key)
+        .cloned()
+    {
+        return Err(PlanError::Binding { problem });
     }
+    let binding = bindings
+        .get(&cfg.key)
+        .expect("a monitor with no binding problem is bound");
 
-    let mut writes = Vec::new();
-    for cfg in config.ordered_monitors() {
-        let binding = bindings
-            .get(&cfg.logical_id)
-            .expect("every configured monitor is bound at this point");
-
-        let Some(mapping) = cfg.mapping(destination) else {
-            return Err(PlanError::MissingMapping {
-                logical_id: cfg.logical_id.clone(),
-                destination: destination.to_string(),
-            });
-        };
-        if !mapping.verification.is_trusted_for_switching() {
-            return Err(PlanError::UntrustedMapping {
-                logical_id: cfg.logical_id.clone(),
-                destination: destination.to_string(),
-                evidence: mapping.verification.to_string(),
-            });
-        }
-        writes.push(PlannedWrite {
-            logical_id: cfg.logical_id.clone(),
-            name: cfg.name.clone(),
-            handle: binding.handle(),
-            code: mapping.input_code,
-        });
-    }
-
-    Ok(SwitchPlan {
-        destination: destination.to_string(),
-        switching_away: destination != config.self_destination,
-        writes,
-        notes,
+    Ok(PlannedSet {
+        key: cfg.key.clone(),
+        label: cfg.label.clone(),
+        handle: binding.handle(),
+        code,
+        advertised: cfg.input(code).is_some(),
     })
 }
 
@@ -160,206 +113,195 @@ impl Default for ExecOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepReport {
-    pub logical_id: String,
-    pub name: String,
+    pub key: String,
+    pub label: String,
     pub requested: InputCode,
     pub before: Option<InputReading>,
     pub outcome: WriteOutcome,
     pub after: Option<InputReading>,
-    /// Set when the write was skipped because the monitor was already there.
+    /// Set when no write was issued because the monitor was already there.
     pub skipped_already_correct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SwitchStatus {
+pub enum ApplyStatus {
     /// Every monitor read back as requested.
     AllConfirmed,
     /// Every write was accepted, but at least one could not be verified.
     AllIssuedSomeUnconfirmed,
-    /// Some monitors failed and some did not.
     Partial,
     AllFailed,
 }
 
-impl fmt::Display for SwitchStatus {
+impl fmt::Display for ApplyStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            SwitchStatus::AllConfirmed => "all monitors confirmed",
-            SwitchStatus::AllIssuedSomeUnconfirmed => {
-                "all writes issued; some could not be confirmed"
+            ApplyStatus::AllConfirmed => "confirmed",
+            ApplyStatus::AllIssuedSomeUnconfirmed => {
+                "issued; could not be confirmed (expected if the input belongs to another computer)"
             }
-            SwitchStatus::Partial => "PARTIAL: some monitors failed",
-            SwitchStatus::AllFailed => "FAILED: no monitor was switched",
+            ApplyStatus::Partial => "PARTIAL: some monitors failed",
+            ApplyStatus::AllFailed => "FAILED: nothing was switched",
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchReport {
-    pub destination: String,
+pub struct ApplyReport {
     pub steps: Vec<StepReport>,
     pub dry_run: bool,
 }
 
-impl SwitchReport {
-    pub fn status(&self) -> SwitchStatus {
+impl ApplyReport {
+    pub fn status(&self) -> ApplyStatus {
         let failed = self.steps.iter().filter(|s| s.outcome.is_failure()).count();
-        if failed == self.steps.len() && !self.steps.is_empty() {
-            return SwitchStatus::AllFailed;
+        if !self.steps.is_empty() && failed == self.steps.len() {
+            return ApplyStatus::AllFailed;
         }
         if failed > 0 {
-            return SwitchStatus::Partial;
+            return ApplyStatus::Partial;
         }
         if self
             .steps
             .iter()
             .all(|s| matches!(s.outcome, WriteOutcome::ConfirmedByRead(_)))
         {
-            SwitchStatus::AllConfirmed
+            ApplyStatus::AllConfirmed
         } else {
-            SwitchStatus::AllIssuedSomeUnconfirmed
+            ApplyStatus::AllIssuedSomeUnconfirmed
         }
     }
 
     /// Exit code: 0 confirmed or issued, 1 partial, 2 total failure.
     pub fn exit_code(&self) -> i32 {
         match self.status() {
-            SwitchStatus::AllConfirmed | SwitchStatus::AllIssuedSomeUnconfirmed => 0,
-            SwitchStatus::Partial => 1,
-            SwitchStatus::AllFailed => 2,
+            ApplyStatus::AllConfirmed | ApplyStatus::AllIssuedSomeUnconfirmed => 0,
+            ApplyStatus::Partial => 1,
+            ApplyStatus::AllFailed => 2,
         }
     }
 }
 
-/// Execute a validated plan.
+/// Set one monitor's input.
 ///
-/// Monitors are handled one at a time and independently: a failure on the
-/// first does not abort the second, because leaving one screen on each
-/// computer is worse than finishing the job. No rollback is attempted — with
-/// connectivity unknown, "undoing" a write is just another blind write.
-pub fn execute(
-    plan: &SwitchPlan,
+/// No rollback and no retry live here. A write is never repeated on this
+/// layer: it may already have been accepted, and repeating an input switch
+/// during re-enumeration compounds the disconnect. A backend that can *prove*
+/// its write never reached the panel may retry internally, which is a
+/// different and safe thing.
+pub fn apply_one(
+    plan: &PlannedSet,
     backend: &dyn MonitorBackend,
     opts: ExecOptions,
     log: &EventLog,
-) -> SwitchReport {
-    log.append(
-        "switch.begin",
-        &[
-            ("destination", plan.destination.clone()),
-            ("monitors", plan.writes.len().to_string()),
-            ("dry_run", opts.dry_run.to_string()),
-        ],
-    );
+) -> StepReport {
+    let before = read_best_effort(backend, &plan.handle);
 
-    let mut steps = Vec::new();
-    for write in &plan.writes {
-        let before = read_best_effort(backend, &write.handle);
-
-        if opts.dry_run {
-            steps.push(StepReport {
-                logical_id: write.logical_id.clone(),
-                name: write.name.clone(),
-                requested: write.code,
-                before,
-                outcome: WriteOutcome::Unknown {
-                    detail: "dry run: no write issued".into(),
-                },
-                after: None,
-                skipped_already_correct: false,
-            });
-            continue;
-        }
-
-        // Already on the requested input: the set is a no-op, so skip the
-        // write entirely. This is what makes pressing the same shortcut twice
-        // safe rather than a cycle.
-        if before.as_ref().and_then(|r| r.value()) == Some(write.code) {
-            log.append(
-                "switch.skip",
-                &[
-                    ("monitor", write.logical_id.clone()),
-                    ("code", write.code.to_string()),
-                    ("reason", "already-on-requested-input".into()),
-                ],
-            );
-            steps.push(StepReport {
-                logical_id: write.logical_id.clone(),
-                name: write.name.clone(),
-                requested: write.code,
-                before,
-                outcome: WriteOutcome::ConfirmedByRead(write.code),
-                after: None,
-                skipped_already_correct: true,
-            });
-            continue;
-        }
-
-        let outcome = match backend.set_input(&write.handle, write.code) {
-            Ok(o) => o,
-            Err(e) => WriteOutcome::Failed {
-                detail: e.to_string(),
-            },
-        };
-        log.append(
-            "switch.write",
-            &[
-                ("monitor", write.logical_id.clone()),
-                ("id", write.handle.backend_id.clone()),
-                ("code", write.code.to_string()),
-                ("outcome", outcome.to_string()),
-            ],
-        );
-
-        // A write is never retried. It may already have been accepted, and
-        // repeating it while the link re-enumerates compounds the disconnect.
-        let mut after = None;
-        let mut final_outcome = outcome;
-        if opts.read_back && !final_outcome.is_failure() {
-            if !opts.settle.is_zero() {
-                std::thread::sleep(opts.settle);
-            }
-            let reading = read_after_write(backend, &write.handle, plan.switching_away);
-            final_outcome = match &reading {
-                InputReading::Value(v) if *v == write.code => WriteOutcome::ConfirmedByRead(*v),
-                InputReading::Value(v) => WriteOutcome::Unknown {
-                    detail: format!("read back {v}, expected {}", write.code),
-                },
-                // Losing contact after switching a monitor to the other
-                // computer is the normal case, not a failure.
-                InputReading::UnavailableAfterSwitch { .. } => WriteOutcome::Accepted,
-                InputReading::ReadFailed { detail } => WriteOutcome::Unknown {
-                    detail: format!("write accepted, read-back failed: {detail}"),
-                },
-                InputReading::Unsupported => WriteOutcome::Accepted,
-            };
-            after = Some(reading);
-        }
-
-        steps.push(StepReport {
-            logical_id: write.logical_id.clone(),
-            name: write.name.clone(),
-            requested: write.code,
+    if opts.dry_run {
+        return StepReport {
+            key: plan.key.clone(),
+            label: plan.label.clone(),
+            requested: plan.code,
             before,
-            outcome: final_outcome,
-            after,
+            outcome: WriteOutcome::Unknown {
+                detail: "dry run: no write issued".into(),
+            },
+            after: None,
             skipped_already_correct: false,
-        });
+        };
     }
 
-    let report = SwitchReport {
-        destination: plan.destination.clone(),
-        steps,
-        dry_run: opts.dry_run,
+    // Already there: the set is a no-op, so skip the write entirely. This is
+    // what makes pressing the same hotkey twice safe rather than a cycle.
+    if before.as_ref().and_then(|r| r.value()) == Some(plan.code) {
+        log.append(
+            "input.skip",
+            &[
+                ("monitor", plan.key.clone()),
+                ("code", plan.code.to_string()),
+                ("reason", "already-on-requested-input".into()),
+            ],
+        );
+        return StepReport {
+            key: plan.key.clone(),
+            label: plan.label.clone(),
+            requested: plan.code,
+            before,
+            outcome: WriteOutcome::ConfirmedByRead(plan.code),
+            after: None,
+            skipped_already_correct: true,
+        };
+    }
+
+    let outcome = match backend.set_input(&plan.handle, plan.code) {
+        Ok(o) => o,
+        Err(e) => WriteOutcome::Failed {
+            detail: e.to_string(),
+        },
     };
     log.append(
-        "switch.end",
+        "input.write",
         &[
-            ("destination", report.destination.clone()),
-            ("status", report.status().to_string()),
+            ("monitor", plan.key.clone()),
+            ("id", plan.handle.backend_id.clone()),
+            ("code", plan.code.to_string()),
+            ("outcome", outcome.to_string()),
         ],
     );
-    report
+
+    let mut after = None;
+    let mut final_outcome = outcome;
+    if opts.read_back && !final_outcome.is_failure() {
+        if !opts.settle.is_zero() {
+            std::thread::sleep(opts.settle);
+        }
+        let reading = read_after_write(backend, &plan.handle);
+        final_outcome = match &reading {
+            InputReading::Value(v) if *v == plan.code => WriteOutcome::ConfirmedByRead(*v),
+            InputReading::Value(v) => WriteOutcome::Unknown {
+                detail: format!("read back {v}, expected {}", plan.code),
+            },
+            // Losing contact right after the write is the normal outcome when
+            // the input we selected belongs to another computer: the monitor
+            // stops answering this one.
+            InputReading::UnavailableAfterSwitch { .. } => WriteOutcome::Accepted,
+            InputReading::ReadFailed { detail } => WriteOutcome::Unknown {
+                detail: format!("write accepted, read-back failed: {detail}"),
+            },
+            InputReading::Unsupported => WriteOutcome::Accepted,
+        };
+        after = Some(reading);
+    }
+
+    StepReport {
+        key: plan.key.clone(),
+        label: plan.label.clone(),
+        requested: plan.code,
+        before,
+        outcome: final_outcome,
+        after,
+        skipped_already_correct: false,
+    }
+}
+
+/// Apply several sets in order, independently.
+///
+/// One monitor failing does not abort the others: leaving half a desk on the
+/// wrong input is worse than finishing the job. Nothing is rolled back —
+/// with connectivity unknown, "undoing" a write is just another blind write.
+pub fn apply_many(
+    plans: &[PlannedSet],
+    backend: &dyn MonitorBackend,
+    opts: ExecOptions,
+    log: &EventLog,
+) -> ApplyReport {
+    ApplyReport {
+        steps: plans
+            .iter()
+            .map(|p| apply_one(p, backend, opts, log))
+            .collect(),
+        dry_run: opts.dry_run,
+    }
 }
 
 fn read_best_effort(backend: &dyn MonitorBackend, handle: &MonitorHandle) -> Option<InputReading> {
@@ -371,39 +313,34 @@ fn read_best_effort(backend: &dyn MonitorBackend, handle: &MonitorHandle) -> Opt
     }
 }
 
-fn read_after_write(
-    backend: &dyn MonitorBackend,
-    handle: &MonitorHandle,
-    switching_away: bool,
-) -> InputReading {
+/// A read that fails immediately after a write is reported as
+/// "unavailable after switch" rather than as a fault: we cannot know whether
+/// the input we just selected belongs to another machine, and treating the
+/// silence as an error would call a successful switch a failure.
+fn read_after_write(backend: &dyn MonitorBackend, handle: &MonitorHandle) -> InputReading {
     match backend.read_input(handle) {
-        Ok(InputReading::ReadFailed { detail }) if switching_away => {
-            InputReading::UnavailableAfterSwitch { detail }
-        }
+        Ok(InputReading::ReadFailed { detail }) => InputReading::UnavailableAfterSwitch { detail },
         Ok(r) => r,
-        Err(e) if switching_away => InputReading::UnavailableAfterSwitch {
-            detail: e.to_string(),
-        },
-        Err(e) => InputReading::ReadFailed {
+        Err(e) => InputReading::UnavailableAfterSwitch {
             detail: e.to_string(),
         },
     }
 }
 
 // ---------------------------------------------------------------------------
-// Serialising concurrent switches
+// Serialising concurrent changes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum GuardError {
-    #[error("another switch is already running (lock held at {path})")]
+    #[error("another change is already running (lock held at {path})")]
     Busy { path: String },
     #[error("could not create lock at {path}: {detail}")]
     Io { path: String, detail: String },
 }
 
-/// A cross-process lock so two shortcuts, or a shortcut and a tray icon,
-/// cannot drive the same DDC interfaces at once.
+/// A cross-process lock, so two hotkeys or a hotkey and the GUI cannot drive
+/// the same DDC interfaces at once.
 #[derive(Debug)]
 pub struct SwitchGuard {
     path: PathBuf,
@@ -454,22 +391,20 @@ impl Drop for SwitchGuard {
 }
 
 // ---------------------------------------------------------------------------
-// Last *requested* destination, tracked separately from observed state
+// Last request, tracked separately from observed state
 // ---------------------------------------------------------------------------
 
 /// What this tool last asked for.
 ///
-/// Deliberately not called "current state": the user can change inputs with
-/// the monitor's own buttons at any time, and the other computer can issue its
-/// own switch. This is intent, and it is reported as intent.
+/// Deliberately not called "current state": inputs can be changed with the
+/// monitor's own buttons at any time, and by any other computer attached to
+/// it. This is intent, and it is reported as intent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastRequest {
-    pub destination: Option<String>,
-    /// Milliseconds since the Unix epoch.
-    ///
-    /// `u64`, not `u128`: TOML integers are 64-bit, and a `u128` here fails to
-    /// serialise, which silently left this file empty and defeated the
-    /// duplicate-press guard entirely.
+    /// The action name, or a description of the one-off request.
+    pub request: Option<String>,
+    /// Milliseconds since the Unix epoch. `u64`, not `u128`: TOML integers
+    /// are 64-bit, and a `u128` silently fails to serialise.
     pub at_unix_ms: Option<u64>,
 }
 
@@ -485,11 +420,11 @@ impl LastRequest {
             .unwrap_or_default()
     }
 
-    /// Persist the request. Returns whether it was actually written, so a
-    /// silent failure cannot quietly disable the duplicate-press guard.
-    pub fn record(dir: &Path, destination: &str) -> bool {
+    /// Returns whether it was actually written, so a silent failure cannot
+    /// quietly disable the duplicate-press guard.
+    pub fn record(dir: &Path, request: &str) -> bool {
         let value = Self {
-            destination: Some(destination.to_string()),
+            request: Some(request.to_string()),
             at_unix_ms: Some(now_unix_ms()),
         };
         if std::fs::create_dir_all(dir).is_err() {
@@ -501,17 +436,16 @@ impl LastRequest {
         }
     }
 
-    /// Whether this request is a duplicate of one just made, e.g. a shortcut
-    /// key repeating because it was held down.
-    pub fn is_duplicate_of(&self, destination: &str, window: Duration) -> bool {
-        let (Some(last), Some(at)) = (self.destination.as_deref(), self.at_unix_ms) else {
+    /// Whether this request repeats one just made, e.g. a shortcut key held
+    /// down. A zero window disables the guard rather than swallowing
+    /// everything in the same millisecond.
+    pub fn is_duplicate_of(&self, request: &str, window: Duration) -> bool {
+        let (Some(last), Some(at)) = (self.request.as_deref(), self.at_unix_ms) else {
             return false;
         };
-        if last != destination {
+        if last != request {
             return false;
         }
-        // Strictly less-than, so a zero window disables deduplication instead
-        // of swallowing every request that lands in the same millisecond.
         u128::from(now_unix_ms().saturating_sub(at)) < window.as_millis()
     }
 }
@@ -523,107 +457,33 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Decide the other named destination, for `toggle`.
-///
-/// Returns `Err` with an explanation whenever the live state is not
-/// trustworthy enough to infer intent — mixed inputs, unreadable monitors, or
-/// a current input that matches no configured destination.
-pub fn infer_toggle_target(
-    config: &Config,
-    observed: &[(String, InputReading)],
-) -> Result<String, String> {
-    let destinations = config.destinations();
-    if destinations.len() != 2 {
-        return Err(format!(
-            "toggle needs exactly two configured destinations, found {}",
-            destinations.len()
-        ));
-    }
-
-    let mut current: Option<String> = None;
-    for (logical_id, reading) in observed {
-        let InputReading::Value(code) = reading else {
-            return Err(format!(
-                "`{logical_id}` could not be read ({reading}), so the current computer is unknown. \
-                 Use `switch <destination>` explicitly."
-            ));
-        };
-        let cfg = config
-            .monitor(logical_id)
-            .ok_or_else(|| format!("`{logical_id}` is not configured"))?;
-        let matched: Vec<&String> = cfg
-            .destinations
-            .iter()
-            .filter(|(_, m)| m.input_code == *code)
-            .map(|(name, _)| name)
-            .collect();
-        let [one] = matched.as_slice() else {
-            return Err(format!(
-                "`{logical_id}` is on {code}, which matches no single configured destination. \
-                 Use `switch <destination>` explicitly."
-            ));
-        };
-        match &current {
-            None => current = Some((*one).clone()),
-            Some(prev) if prev == *one => {}
-            Some(prev) => {
-                return Err(format!(
-                    "monitors disagree: one is on `{prev}`, `{logical_id}` is on `{one}`. \
-                     Use `switch <destination>` explicitly."
-                ))
-            }
-        }
-    }
-
-    let current = current.ok_or_else(|| "no monitors were read".to_string())?;
-    destinations
-        .into_iter()
-        .find(|d| *d != current)
-        .ok_or_else(|| "could not determine the other destination".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BackendKind, DestinationMapping, MonitorConfig};
+    use crate::config::{BackendKind, MonitorConfig, MonitorInput};
     use crate::fake::{FakeBackend, FakeBehavior, FakeMonitor};
-    use crate::types::Evidence;
-    use std::collections::BTreeMap;
 
-    const WIN: u8 = 0x11;
-    const UBU: u8 = 0x0F;
+    const HDMI: u8 = 0x11;
+    const DP: u8 = 0x0F;
 
-    fn monitor_cfg(id: &str, backend_id: &str, serial: &str, win: u8, ubu: u8) -> MonitorConfig {
-        let mut destinations = BTreeMap::new();
-        for (name, code) in [("windows", win), ("ubuntu", ubu)] {
-            destinations.insert(
-                name.to_string(),
-                DestinationMapping {
-                    input_code: InputCode(code),
-                    verification: Evidence::UserConfirmed,
-                    verified_on: Some("2026-09-16".into()),
-                    note: None,
-                },
-            );
-        }
+    fn monitor_cfg(key: &str, backend_id: &str) -> MonitorConfig {
         MonitorConfig {
-            logical_id: id.into(),
-            name: format!("AOC 27P2DG5 - {id}"),
+            key: key.into(),
+            label: format!("AOC 27P2DG5 ({key})"),
             backend_id: backend_id.into(),
-            serial: Some(serial.into()),
+            serial: Some(key.into()),
             model: Some("27P2DG5".into()),
-            destinations,
+            inputs: vec![
+                MonitorInput::reported(InputCode(HDMI), None),
+                MonitorInput::reported(InputCode(DP), None),
+            ],
         }
     }
 
-    /// Mirrors the real machine: the two panels use *different* codes for the
-    /// same computer, so a single batched write would be wrong.
     fn config() -> Config {
-        let mut c = Config::new("alienware-windows", BackendKind::Fake, "windows");
-        c.monitors = vec![
-            monitor_cfg("left", "port-a", "SN-L", WIN, UBU),
-            monitor_cfg("right", "port-b", "SN-R", UBU, WIN),
-        ];
+        let mut c = Config::new("test-host", BackendKind::Fake);
+        c.monitors.push(monitor_cfg("SN-L", "port-a"));
+        c.monitors.push(monitor_cfg("SN-R", "port-b"));
         c
     }
 
@@ -642,267 +502,160 @@ mod tests {
         }
     }
 
-    fn run(cfg: &Config, be: &FakeBackend, dest: &str) -> SwitchReport {
+    fn set(cfg: &Config, be: &FakeBackend, monitor: &str, code: u8) -> StepReport {
         let detected = be.discover().unwrap();
-        let plan = plan(cfg, &detected, dest).unwrap();
-        execute(&plan, be, fast(), &EventLog::disabled())
+        let plan = plan_set_input(cfg, &detected, monitor, InputCode(code)).unwrap();
+        apply_one(&plan, be, fast(), &EventLog::disabled())
     }
 
     #[test]
-    fn switching_writes_each_monitors_own_code() {
+    fn sets_the_named_monitor_and_only_that_one() {
         let cfg = config();
-        let be = backend(WIN, UBU);
-        let report = run(&cfg, &be, "ubuntu");
-        assert_eq!(report.status(), SwitchStatus::AllConfirmed);
-        // left -> 0x0F, right -> 0x11: different values, same destination.
-        assert_eq!(
-            be.writes(),
-            vec![
-                ("port-a".to_string(), InputCode(UBU)),
-                ("port-b".to_string(), InputCode(WIN)),
-            ]
-        );
+        let be = backend(HDMI, HDMI);
+        let report = set(&cfg, &be, "SN-L", DP);
+
+        assert_eq!(report.outcome, WriteOutcome::ConfirmedByRead(InputCode(DP)));
+        assert_eq!(be.writes(), vec![("port-a".to_string(), InputCode(DP))]);
+        assert_eq!(be.current_input("port-b"), Some(InputCode(HDMI)));
     }
 
     #[test]
-    fn requesting_the_current_destination_writes_nothing_and_does_not_cycle() {
+    fn a_monitor_can_be_named_by_key_or_label() {
         let cfg = config();
-        // Already showing Windows: left on 0x11, right on 0x0F.
-        let be = backend(WIN, UBU);
-        let report = run(&cfg, &be, "windows");
+        let be = backend(HDMI, HDMI);
+        let detected = be.discover().unwrap();
+        assert!(plan_set_input(&cfg, &detected, "SN-L", InputCode(DP)).is_ok());
+        assert!(plan_set_input(&cfg, &detected, "AOC 27P2DG5 (SN-L)", InputCode(DP)).is_ok());
+    }
+
+    #[test]
+    fn setting_the_input_it_is_already_on_writes_nothing() {
+        let cfg = config();
+        let be = backend(HDMI, HDMI);
+        let report = set(&cfg, &be, "SN-L", HDMI);
         assert!(be.writes().is_empty(), "no write should be issued");
-        assert!(report.steps.iter().all(|s| s.skipped_already_correct));
-        assert_eq!(report.status(), SwitchStatus::AllConfirmed);
+        assert!(report.skipped_already_correct);
     }
 
     #[test]
-    fn repeating_a_switch_is_idempotent() {
+    fn repeating_a_set_is_idempotent() {
         let cfg = config();
-        let be = backend(WIN, UBU);
-        run(&cfg, &be, "ubuntu");
+        let be = backend(HDMI, HDMI);
+        set(&cfg, &be, "SN-L", DP);
         let first = be.writes().len();
-        run(&cfg, &be, "ubuntu");
+        set(&cfg, &be, "SN-L", DP);
         assert_eq!(be.writes().len(), first, "second run must be a no-op");
-        assert_eq!(be.current_input("port-a"), Some(InputCode(UBU)));
+        assert_eq!(be.current_input("port-a"), Some(InputCode(DP)));
     }
 
     #[test]
-    fn mixed_inputs_still_converge_on_the_requested_destination() {
+    fn losing_contact_after_the_write_is_not_a_failure() {
         let cfg = config();
-        // left already on ubuntu, right still on windows.
-        let be = backend(UBU, UBU);
-        let report = run(&cfg, &be, "ubuntu");
-        assert_eq!(report.status(), SwitchStatus::AllConfirmed);
-        assert_eq!(be.current_input("port-a"), Some(InputCode(UBU)));
-        assert_eq!(be.current_input("port-b"), Some(InputCode(WIN)));
-    }
-
-    #[test]
-    fn losing_contact_after_switching_away_is_not_reported_as_failure() {
-        let cfg = config();
-        let be = FakeBackend::new(vec![
-            FakeMonitor::new("port-a", Some("SN-L"), WIN)
-                .with_behavior(FakeBehavior::SilentAfterWrite),
-            FakeMonitor::new("port-b", Some("SN-R"), UBU)
-                .with_behavior(FakeBehavior::SilentAfterWrite),
-        ]);
-        let report = run(&cfg, &be, "ubuntu");
-        assert_eq!(report.status(), SwitchStatus::AllIssuedSomeUnconfirmed);
-        for step in &report.steps {
-            assert_eq!(step.outcome, WriteOutcome::Accepted);
-            assert!(matches!(
-                step.after,
-                Some(InputReading::UnavailableAfterSwitch { .. })
-            ));
-            // The honest phrasing, not a claim of success.
-            assert!(step.outcome.to_string().contains("unconfirmed"));
-        }
-    }
-
-    #[test]
-    fn one_monitor_failing_is_reported_as_partial_not_all_or_nothing() {
-        let cfg = config();
-        let be = FakeBackend::new(vec![
-            FakeMonitor::new("port-a", Some("SN-L"), WIN),
-            FakeMonitor::new("port-b", Some("SN-R"), UBU)
-                .with_behavior(FakeBehavior::WriteFails("i2c write failed".into())),
-        ]);
-        let report = run(&cfg, &be, "ubuntu");
-        assert_eq!(report.status(), SwitchStatus::Partial);
-        assert_eq!(report.exit_code(), 1);
-        assert!(!report.steps[0].outcome.is_failure());
-        assert!(report.steps[1].outcome.is_failure());
-        // The monitor that worked stays switched: no rollback is attempted.
-        assert_eq!(be.current_input("port-a"), Some(InputCode(UBU)));
+        let be = FakeBackend::new(vec![FakeMonitor::new("port-a", Some("SN-L"), HDMI)
+            .with_behavior(FakeBehavior::SilentAfterWrite)]);
+        let report = set(&cfg, &be, "SN-L", DP);
+        assert_eq!(report.outcome, WriteOutcome::Accepted);
+        assert!(report.outcome.to_string().contains("unconfirmed"));
     }
 
     #[test]
     fn a_write_that_is_silently_ignored_is_not_called_success() {
         let cfg = config();
-        let be = FakeBackend::new(vec![
-            FakeMonitor::new("port-a", Some("SN-L"), WIN)
-                .with_behavior(FakeBehavior::IgnoresWrites),
-            FakeMonitor::new("port-b", Some("SN-R"), UBU),
-        ]);
-        let report = run(&cfg, &be, "ubuntu");
-        assert!(matches!(
-            report.steps[0].outcome,
-            WriteOutcome::Unknown { .. }
-        ));
-        assert_ne!(report.status(), SwitchStatus::AllConfirmed);
+        let be = FakeBackend::new(vec![FakeMonitor::new("port-a", Some("SN-L"), HDMI)
+            .with_behavior(FakeBehavior::IgnoresWrites)]);
+        let report = set(&cfg, &be, "SN-L", DP);
+        assert!(matches!(report.outcome, WriteOutcome::Unknown { .. }));
     }
 
     #[test]
-    fn a_disconnected_monitor_blocks_the_plan_before_any_write() {
+    fn a_failing_write_is_reported_as_failed() {
         let cfg = config();
-        let be = backend(WIN, UBU);
+        let be = FakeBackend::new(vec![FakeMonitor::new("port-a", Some("SN-L"), HDMI)
+            .with_behavior(FakeBehavior::WriteFails("i2c write failed".into()))]);
+        let report = set(&cfg, &be, "SN-L", DP);
+        assert!(report.outcome.is_failure());
+    }
+
+    #[test]
+    fn one_monitor_failing_leaves_the_others_done() {
+        let cfg = config();
+        let be = FakeBackend::new(vec![
+            FakeMonitor::new("port-a", Some("SN-L"), HDMI),
+            FakeMonitor::new("port-b", Some("SN-R"), HDMI)
+                .with_behavior(FakeBehavior::WriteFails("nope".into())),
+        ]);
+        let detected = be.discover().unwrap();
+        let plans = vec![
+            plan_set_input(&cfg, &detected, "SN-L", InputCode(DP)).unwrap(),
+            plan_set_input(&cfg, &detected, "SN-R", InputCode(DP)).unwrap(),
+        ];
+        let report = apply_many(&plans, &be, fast(), &EventLog::disabled());
+
+        assert_eq!(report.status(), ApplyStatus::Partial);
+        assert_eq!(report.exit_code(), 1);
+        // The one that worked stays switched: no rollback is attempted.
+        assert_eq!(be.current_input("port-a"), Some(InputCode(DP)));
+    }
+
+    #[test]
+    fn a_disconnected_monitor_is_refused_before_any_write() {
+        let cfg = config();
+        let be = backend(HDMI, HDMI);
         be.detach("port-b");
         let detected = be.discover().unwrap();
-        let err = plan(&cfg, &detected, "ubuntu").unwrap_err();
+        let err = plan_set_input(&cfg, &detected, "SN-R", InputCode(DP)).unwrap_err();
         assert!(matches!(err, PlanError::Binding { .. }));
         assert!(be.writes().is_empty(), "nothing may be written on refusal");
     }
 
     #[test]
-    fn an_unverified_mapping_refuses_to_switch() {
-        let mut cfg = config();
-        cfg.monitor_mut("right")
-            .unwrap()
-            .destinations
-            .get_mut("ubuntu")
-            .unwrap()
-            .verification = Evidence::Reported;
-        let be = backend(WIN, UBU);
-        let detected = be.discover().unwrap();
-        let err = plan(&cfg, &detected, "ubuntu").unwrap_err();
-        assert!(matches!(err, PlanError::UntrustedMapping { .. }));
-        assert!(err.to_string().contains("user-confirmed") || err.to_string().contains("reported"));
-        assert!(be.writes().is_empty());
-    }
-
-    #[test]
-    fn a_missing_mapping_refuses_to_switch() {
-        let mut cfg = config();
-        cfg.monitor_mut("left")
-            .unwrap()
-            .destinations
-            .remove("ubuntu");
-        let be = backend(WIN, UBU);
-        let detected = be.discover().unwrap();
-        assert!(matches!(
-            plan(&cfg, &detected, "ubuntu").unwrap_err(),
-            PlanError::MissingMapping { .. }
-        ));
-        assert!(be.writes().is_empty());
-    }
-
-    #[test]
-    fn unknown_destination_lists_the_real_ones() {
+    fn an_unknown_monitor_lists_the_configured_ones() {
         let cfg = config();
-        let be = backend(WIN, UBU);
+        let be = backend(HDMI, HDMI);
         let detected = be.discover().unwrap();
-        let err = plan(&cfg, &detected, "macos").unwrap_err();
-        assert!(err.to_string().contains("windows"), "{err}");
+        let err = plan_set_input(&cfg, &detected, "nope", InputCode(DP)).unwrap_err();
+        assert!(err.to_string().contains("SN-L"), "{err}");
+    }
+
+    #[test]
+    fn an_unadvertised_code_is_flagged_but_not_refused() {
+        // Capability strings are wrong in both directions, so this is the
+        // user's call to make, not the tool's.
+        let cfg = config();
+        let be = backend(HDMI, HDMI);
+        let detected = be.discover().unwrap();
+        let plan = plan_set_input(&cfg, &detected, "SN-L", InputCode(0x03)).unwrap();
+        assert!(!plan.advertised);
     }
 
     #[test]
     fn dry_run_touches_nothing() {
         let cfg = config();
-        let be = backend(WIN, UBU);
+        let be = backend(HDMI, HDMI);
         let detected = be.discover().unwrap();
-        let p = plan(&cfg, &detected, "ubuntu").unwrap();
+        let plan = plan_set_input(&cfg, &detected, "SN-L", InputCode(DP)).unwrap();
         let opts = ExecOptions {
             settle: Duration::ZERO,
             dry_run: true,
             ..Default::default()
         };
-        execute(&p, &be, opts, &EventLog::disabled());
+        apply_one(&plan, &be, opts, &EventLog::disabled());
         assert!(be.writes().is_empty());
     }
 
     #[test]
-    fn switch_order_is_honoured() {
-        let mut cfg = config();
-        cfg.switch_order = Some(vec!["right".into(), "left".into()]);
-        let be = backend(WIN, UBU);
-        run(&cfg, &be, "ubuntu");
-        assert_eq!(be.writes()[0].0, "port-b");
-        assert_eq!(be.writes()[1].0, "port-a");
-    }
-
-    #[test]
-    fn an_unconfigured_extra_display_is_noted_but_not_switched() {
+    fn nothing_in_this_module_needs_to_know_what_is_plugged_in() {
+        // The planner takes a monitor and a code. If a computer name ever
+        // becomes necessary here, the design has regressed.
         let cfg = config();
-        let be = FakeBackend::new(vec![
-            FakeMonitor::new("port-a", Some("SN-L"), WIN),
-            FakeMonitor::new("port-b", Some("SN-R"), UBU),
-            FakeMonitor::new("port-x", Some("SN-X"), WIN),
-        ]);
-        let detected = be.discover().unwrap();
-        let p = plan(&cfg, &detected, "ubuntu").unwrap();
-        assert_eq!(p.writes.len(), 2);
-        assert!(p.notes.iter().any(|n| n.contains("not configured")));
-        execute(&p, &be, fast(), &EventLog::disabled());
-        assert!(be.writes().iter().all(|(id, _)| id != "port-x"));
-    }
-
-    // -- toggle -------------------------------------------------------------
-
-    #[test]
-    fn toggle_picks_the_other_computer_when_state_is_clear() {
-        let cfg = config();
-        let observed = vec![
-            ("left".to_string(), InputReading::Value(InputCode(WIN))),
-            ("right".to_string(), InputReading::Value(InputCode(UBU))),
-        ];
-        assert_eq!(infer_toggle_target(&cfg, &observed).unwrap(), "ubuntu");
-    }
-
-    #[test]
-    fn toggle_refuses_when_monitors_disagree() {
-        let cfg = config();
-        let observed = vec![
-            ("left".to_string(), InputReading::Value(InputCode(WIN))),
-            ("right".to_string(), InputReading::Value(InputCode(WIN))),
-        ];
-        let err = infer_toggle_target(&cfg, &observed).unwrap_err();
-        assert!(err.contains("disagree"), "{err}");
-    }
-
-    #[test]
-    fn toggle_refuses_when_a_monitor_cannot_be_read() {
-        let cfg = config();
-        let observed = vec![
-            ("left".to_string(), InputReading::Value(InputCode(WIN))),
-            (
-                "right".to_string(),
-                InputReading::ReadFailed {
-                    detail: "no response".into(),
-                },
-            ),
-        ];
-        assert!(infer_toggle_target(&cfg, &observed).is_err());
-    }
-
-    #[test]
-    fn toggle_refuses_after_a_manual_osd_change_to_an_unmapped_input() {
-        let cfg = config();
-        // Someone pressed the monitor buttons and chose VGA.
-        let observed = vec![
-            ("left".to_string(), InputReading::Value(InputCode(0x01))),
-            ("right".to_string(), InputReading::Value(InputCode(UBU))),
-        ];
-        let err = infer_toggle_target(&cfg, &observed).unwrap_err();
-        assert!(
-            err.contains("matches no single configured destination"),
-            "{err}"
-        );
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("destination"), "{text}");
     }
 
     // -- guard and last-request --------------------------------------------
 
     #[test]
-    fn the_guard_serialises_concurrent_switches() {
+    fn the_guard_serialises_concurrent_changes() {
         let dir = std::env::temp_dir().join(format!("ds-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let first = SwitchGuard::acquire(&dir, Duration::from_secs(60)).unwrap();
@@ -911,7 +664,6 @@ mod tests {
             Err(GuardError::Busy { .. })
         ));
         drop(first);
-        // Released on drop, so the next invocation proceeds.
         assert!(SwitchGuard::acquire(&dir, Duration::from_secs(60)).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -928,33 +680,16 @@ mod tests {
 
     #[test]
     fn the_last_request_survives_a_round_trip_to_disk() {
-        // Regression: this was serialised as u128, which TOML cannot hold, so
-        // the file was never written and every repeat press got through.
         let dir = std::env::temp_dir().join(format!("ds-last-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(
-            LastRequest::record(&dir, "ubuntu"),
-            "recording the last request must actually write the file"
-        );
+        assert!(LastRequest::record(&dir, "Desk setup"));
         let loaded = LastRequest::load(&dir);
-        assert_eq!(loaded.destination.as_deref(), Some("ubuntu"));
-        assert!(loaded.at_unix_ms.is_some());
-        assert!(loaded.is_duplicate_of("ubuntu", Duration::from_secs(60)));
-        assert!(!loaded.is_duplicate_of("windows", Duration::from_secs(60)));
+        assert_eq!(loaded.request.as_deref(), Some("Desk setup"));
+        assert!(loaded.is_duplicate_of("Desk setup", Duration::from_secs(60)));
+        assert!(!loaded.is_duplicate_of("Something else", Duration::from_secs(60)));
+        assert!(!loaded.is_duplicate_of("Desk setup", Duration::ZERO));
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn repeated_shortcut_presses_are_deduplicated() {
-        let last = LastRequest {
-            destination: Some("ubuntu".into()),
-            at_unix_ms: Some(now_unix_ms()),
-        };
-        assert!(last.is_duplicate_of("ubuntu", Duration::from_millis(1500)));
-        assert!(!last.is_duplicate_of("windows", Duration::from_millis(1500)));
-        assert!(!last.is_duplicate_of("ubuntu", Duration::ZERO));
-        assert!(!LastRequest::default().is_duplicate_of("ubuntu", Duration::from_secs(5)));
     }
 }

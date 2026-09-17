@@ -24,46 +24,40 @@ impl Binding<'_> {
         self.detected.handle()
     }
 
-    pub fn logical_id(&self) -> &str {
-        &self.monitor.logical_id
+    pub fn key(&self) -> &str {
+        &self.monitor.key
     }
 }
 
 /// A reason one configured monitor could not be safely addressed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BindingProblem {
-    #[error("`{logical_id}` is not attached: nothing present matches {looked_for}")]
-    NotFound {
-        logical_id: String,
-        looked_for: String,
-    },
-    #[error("`{logical_id}` is ambiguous: {} displays match ({}). Refusing to guess.",
+    #[error("`{monitor}` is not attached: nothing present matches {looked_for}")]
+    NotFound { monitor: String, looked_for: String },
+    #[error("`{monitor}` is ambiguous: {} displays match ({}). Refusing to guess.",
             candidates.len(), candidates.join(", "))]
     Ambiguous {
-        logical_id: String,
+        monitor: String,
         candidates: Vec<String>,
     },
-    #[error("`{logical_id}` (serial {serial}) is now on connection `{found}` but was configured on `{configured}`. Cabling changed, so its verified input codes may point at the wrong physical port. Re-run `desktop-switcher configure` before switching.")]
+    #[error("`{monitor}` (serial {serial}) is now on connection `{found}` but was configured on `{configured}`. Cabling changed, so its verified input codes may point at the wrong physical port. Re-run `desktop-switcher configure` before switching.")]
     PortChanged {
-        logical_id: String,
+        monitor: String,
         serial: String,
         configured: String,
         found: String,
     },
-    #[error("`{logical_id}` is reachable over {transport}, which cannot carry VCP 0x60")]
-    NotSwitchable {
-        logical_id: String,
-        transport: String,
-    },
+    #[error("`{monitor}` is reachable over {transport}, which cannot carry VCP 0x60")]
+    NotSwitchable { monitor: String, transport: String },
 }
 
 impl BindingProblem {
-    pub fn logical_id(&self) -> &str {
+    pub fn monitor(&self) -> &str {
         match self {
-            BindingProblem::NotFound { logical_id, .. }
-            | BindingProblem::Ambiguous { logical_id, .. }
-            | BindingProblem::PortChanged { logical_id, .. }
-            | BindingProblem::NotSwitchable { logical_id, .. } => logical_id,
+            BindingProblem::NotFound { monitor, .. }
+            | BindingProblem::Ambiguous { monitor, .. }
+            | BindingProblem::PortChanged { monitor, .. }
+            | BindingProblem::NotSwitchable { monitor, .. } => monitor,
         }
     }
 }
@@ -81,8 +75,8 @@ impl<'a> BindingSet<'a> {
         self.problems.is_empty()
     }
 
-    pub fn get(&self, logical_id: &str) -> Option<&Binding<'a>> {
-        self.bound.iter().find(|b| b.logical_id() == logical_id)
+    pub fn get(&self, key: &str) -> Option<&Binding<'a>> {
+        self.bound.iter().find(|b| b.key() == key)
     }
 }
 
@@ -140,7 +134,7 @@ fn resolve_one<'a>(
                 // occupies, and that assumption no longer holds.
                 if detected.identity.backend_id != cfg.backend_id {
                     return Err(BindingProblem::PortChanged {
-                        logical_id: cfg.logical_id.clone(),
+                        monitor: cfg.key.clone(),
                         serial: want_serial.to_string(),
                         configured: cfg.backend_id.clone(),
                         found: detected.identity.backend_id.clone(),
@@ -159,17 +153,17 @@ fn resolve_one<'a>(
                     .find(|d| d.identity.serial.as_deref() == Some(want_serial))
                 {
                     return Err(BindingProblem::NotSwitchable {
-                        logical_id: cfg.logical_id.clone(),
+                        monitor: cfg.key.clone(),
                         transport: d.identity.transport.to_string(),
                     });
                 }
                 Err(BindingProblem::NotFound {
-                    logical_id: cfg.logical_id.clone(),
+                    monitor: cfg.key.clone(),
                     looked_for: format!("serial {want_serial}"),
                 })
             }
             _ => Err(BindingProblem::Ambiguous {
-                logical_id: cfg.logical_id.clone(),
+                monitor: cfg.key.clone(),
                 candidates: matches
                     .iter()
                     .map(|d| d.identity.backend_id.clone())
@@ -192,15 +186,15 @@ fn resolve_one<'a>(
             notes: vec![format!(
                 "`{}` has no EDID serial, so it is bound by connection id alone. \
                  Swapping cables between identical panels would silently rebind it.",
-                cfg.logical_id
+                cfg.key
             )],
         }),
         0 => Err(BindingProblem::NotFound {
-            logical_id: cfg.logical_id.clone(),
+            monitor: cfg.key.clone(),
             looked_for: format!("connection {}", cfg.backend_id),
         }),
         _ => Err(BindingProblem::Ambiguous {
-            logical_id: cfg.logical_id.clone(),
+            monitor: cfg.key.clone(),
             candidates: matches
                 .iter()
                 .map(|d| d.identity.backend_id.clone())
@@ -233,9 +227,8 @@ pub fn duplicate_serials(detected: &[DetectedMonitor]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BackendKind, DestinationMapping};
-    use crate::types::{Evidence, MonitorIdentity, Transport};
-    use std::collections::BTreeMap;
+    use crate::config::{BackendKind, MonitorInput};
+    use crate::types::{MonitorIdentity, Transport};
 
     fn detected(backend_id: &str, serial: Option<&str>, transport: Transport) -> DetectedMonitor {
         DetectedMonitor {
@@ -252,28 +245,18 @@ mod tests {
     }
 
     fn cfg_monitor(id: &str, backend_id: &str, serial: Option<&str>) -> MonitorConfig {
-        let mut destinations = BTreeMap::new();
-        destinations.insert(
-            "windows".to_string(),
-            DestinationMapping {
-                input_code: "0x11".parse().unwrap(),
-                verification: Evidence::UserConfirmed,
-                verified_on: None,
-                note: None,
-            },
-        );
         MonitorConfig {
-            logical_id: id.into(),
-            name: id.into(),
+            key: id.into(),
+            label: id.into(),
             backend_id: backend_id.into(),
             serial: serial.map(String::from),
             model: Some("27P2DG5".into()),
-            destinations,
+            inputs: vec![MonitorInput::reported("0x11".parse().unwrap(), None)],
         }
     }
 
     fn config_with(monitors: Vec<MonitorConfig>) -> Config {
-        let mut c = Config::new("host", BackendKind::Fake, "windows");
+        let mut c = Config::new("host", BackendKind::Fake);
         c.monitors = monitors;
         c
     }

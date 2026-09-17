@@ -27,8 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::displayconfig;
 use crate::{
-    detach_is_safe, sweep_target, DesktopDisplay, DesktopError, DesktopManager, Rect,
-    SavedDisplayMode, SweepReport,
+    detach_is_safe, sweep_target, DesktopDisplay, DesktopError, DesktopManager, MovedWindow, Rect,
+    RestoreReport, SavedDisplayMode, SweepReport,
 };
 
 const SW_SHOWMAXIMIZED_FLAG: u32 = 3;
@@ -245,6 +245,32 @@ impl DesktopManager for WindowsDesktop {
         Ok(ctx.report)
     }
 
+    fn restore_windows(&self, windows: &[MovedWindow]) -> Result<RestoreReport, DesktopError> {
+        ensure_dpi_aware();
+        if windows.is_empty() {
+            return Ok(RestoreReport::default());
+        }
+        let mut ctx = RestoreCtx {
+            wanted: windows.to_vec(),
+            done: Vec::new(),
+        };
+        unsafe {
+            let _ = EnumWindows(
+                Some(restore_callback),
+                LPARAM(&mut ctx as *mut RestoreCtx as isize),
+            );
+        }
+        let missing = windows
+            .iter()
+            .filter(|w| !ctx.done.contains(&w.title))
+            .map(|w| w.title.clone())
+            .collect();
+        Ok(RestoreReport {
+            restored: ctx.done,
+            missing,
+        })
+    }
+
     fn set_primary(&self, display: &DesktopDisplay) -> Result<(), DesktopError> {
         ensure_dpi_aware();
         if display.is_primary {
@@ -388,6 +414,9 @@ unsafe extern "system" fn sweep_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if !ctx.source.contains(cx, cy) {
         return TRUE;
     }
+    // Remembered before anything is changed, so a restore can undo exactly
+    // this move rather than an approximation of it.
+    let original = bounds;
 
     // A maximized window has to be restored before it can be moved, then
     // maximized again on the new display.
@@ -444,17 +473,74 @@ unsafe extern "system" fn sweep_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
             after.top + (after.bottom - after.top) / 2,
         );
 
+    if was_maximized {
+        let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
+    }
     if landed {
-        if was_maximized {
-            let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
-        }
-        ctx.report.moved.push(title);
+        ctx.report.moved.push(MovedWindow {
+            title,
+            from: original,
+            was_maximized,
+        });
     } else {
-        // Put a restored-but-unmoved window back the way it was found.
-        if was_maximized {
-            let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
-        }
         ctx.report.skipped.push(title);
     }
     TRUE
+}
+
+/// Move one window back to a remembered position, matched by title.
+unsafe extern "system" fn restore_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let ctx = &mut *(lparam.0 as *mut RestoreCtx);
+
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return TRUE;
+    }
+    let title = window_title(hwnd);
+    if title.is_empty() {
+        return TRUE;
+    }
+    let Some(index) = ctx
+        .wanted
+        .iter()
+        .position(|w| w.title == title && !ctx.done.contains(&w.title))
+    else {
+        return TRUE;
+    };
+    let wanted = ctx.wanted[index].clone();
+
+    // A maximized window has to be restored before it can be placed.
+    let mut placement = WINDOWPLACEMENT {
+        length: size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    let is_maximized = unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok()
+        && placement.showCmd == SW_SHOWMAXIMIZED_FLAG;
+    if is_maximized {
+        let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+    }
+
+    let moved = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            wanted.from.left,
+            wanted.from.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+    if wanted.was_maximized {
+        let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
+    }
+
+    if moved.is_ok() {
+        ctx.done.push(wanted.title);
+    }
+    TRUE
+}
+
+struct RestoreCtx {
+    wanted: Vec<MovedWindow>,
+    done: Vec<String>,
 }

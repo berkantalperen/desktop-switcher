@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
 use switcher_core::types::{DetectedMonitor, Transport};
-use switcher_desktop::{DesktopDisplay, DesktopManager, SavedDisplayMode};
+use switcher_desktop::{DesktopDisplay, DesktopManager, MovedWindow, SavedDisplayMode};
 
 use crate::ui;
 use crate::App;
@@ -39,6 +39,36 @@ pub struct ReleasedState {
 impl ReleasedState {
     fn path(dir: &Path) -> PathBuf {
         dir.join("released-displays.toml")
+    }
+
+    pub fn load(dir: &Path) -> Self {
+        std::fs::read_to_string(Self::path(dir))
+            .ok()
+            .and_then(|t| toml::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(Self::path(dir), toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}
+
+/// Where windows were before the last sweep, so it can be undone.
+///
+/// Keyed by monitor, because sweeping two monitors and restoring one should
+/// only put back what came off that one. Kept on disk because sweep and
+/// restore are separate runs of the program.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SweptState {
+    #[serde(default)]
+    pub swept: BTreeMap<String, Vec<MovedWindow>>,
+}
+
+impl SweptState {
+    fn path(dir: &Path) -> PathBuf {
+        dir.join("swept-windows.toml")
     }
 
     pub fn load(dir: &Path) -> Self {
@@ -140,7 +170,7 @@ fn target_monitor(app: &App, monitor: Option<&str>) -> Result<(String, String)> 
 
     match monitor {
         Some(name) => match config.monitor(name) {
-            Some(m) => Ok((m.backend_id.clone(), m.logical_id.clone())),
+            Some(m) => Ok((m.backend_id.clone(), m.label.clone())),
             // Not a configured logical id, so take it as a raw selector: a
             // device path or a GDI name. A display this tool does not manage
             // can still get stranded by a topology change, and refusing to
@@ -148,12 +178,12 @@ fn target_monitor(app: &App, monitor: Option<&str>) -> Result<(String, String)> 
             None => Ok((name.to_string(), name.to_string())),
         },
         None => match config.monitors.as_slice() {
-            [one] => Ok((one.backend_id.clone(), one.logical_id.clone())),
+            [one] => Ok((one.backend_id.clone(), one.label.clone())),
             [] => bail!("no monitors are configured"),
             many => bail!(
                 "several monitors are configured ({}); name one with --monitor",
                 many.iter()
-                    .map(|m| m.logical_id.as_str())
+                    .map(|m| m.key.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -439,14 +469,24 @@ pub fn sweep(app: &App, monitor: Option<&str>) -> Result<i32> {
         ],
     );
 
+    // Remember where they came from so the move can be undone. Only replace
+    // a previous record when something actually moved, or a second sweep
+    // would wipe the positions the first one saved.
+    if !report.moved.is_empty() {
+        let mut state = SweptState::load(&app.state_dir);
+        state.swept.insert(backend_id.clone(), report.moved.clone());
+        state.save(&app.state_dir)?;
+    }
+
     if report.moved.is_empty() && report.skipped.is_empty() {
         println!("No windows were on `{label}`.");
         return Ok(0);
     }
     println!("Moved {} window(s) off `{label}`:", report.moved.len());
-    for title in &report.moved {
-        ui::bullet(title);
+    for window in &report.moved {
+        ui::bullet(&window.title);
     }
+    println!("\nPut them back with: desktop-switcher restore-windows");
     if !report.skipped.is_empty() {
         println!("\nCould not move {} window(s):", report.skipped.len());
         for title in &report.skipped {
@@ -456,76 +496,73 @@ pub fn sweep(app: &App, monitor: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
-// ---------------------------------------------------------------------------
-// side effects applied around a `switch`
-// ---------------------------------------------------------------------------
-
-/// Apply the outbound layer-2 action for one monitor, before its input moves.
+/// Put windows back where a sweep found them.
 ///
-/// Failures here are reported but never abort the switch: changing the input
-/// is what the user asked for, and tidying the desktop is a convenience.
-pub fn apply_away(app: &App, backend_id: &str, label: &str, release_it: bool) {
-    let detected = app.backend.discover().unwrap_or_default();
-    let manager = manager(&detected);
-    let Ok(display) = display_for(manager.as_ref(), backend_id) else {
-        return;
-    };
-    if !display.is_attached {
-        return;
+/// Best effort by design: windows are matched by title, because a window
+/// handle means nothing outside the process that read it. A window that has
+/// since been closed or renamed is reported as missing rather than silently
+/// skipped.
+pub fn restore_windows(app: &App, monitor: Option<&str>) -> Result<i32> {
+    let mut state = SweptState::load(&app.state_dir);
+    if state.swept.is_empty() {
+        println!("Nothing has been swept, so there is nothing to put back.");
+        return Ok(0);
     }
 
-    if release_it {
-        match manager.detach(&display) {
-            Ok(saved) => {
-                let mut state = ReleasedState::load(&app.state_dir);
-                state.released.insert(backend_id.to_string(), saved);
-                let _ = state.save(&app.state_dir);
-                println!("  {label:<10} released from this desktop");
+    // Naming a monitor restores only what came off that one.
+    let keys: Vec<String> = match monitor {
+        Some(_) => {
+            let (backend_id, _) = target_monitor(app, monitor)?;
+            if !state.swept.contains_key(&backend_id) {
+                println!("Nothing was swept off that monitor.");
+                return Ok(0);
             }
-            Err(e) => ui::warn(format!("could not release `{label}`: {e}")),
+            vec![backend_id]
         }
-        return;
-    }
-
-    match manager.sweep_windows_off(&display) {
-        Ok(report) if report.moved.is_empty() => {}
-        Ok(report) => println!(
-            "  {label:<10} moved {} window(s) off it",
-            report.moved.len()
-        ),
-        Err(e) => ui::warn(format!("could not sweep windows off `{label}`: {e}")),
-    }
-}
-
-/// Reattach a monitor this computer had released, after its input comes back.
-pub fn apply_home(app: &App, backend_id: &str, label: &str) {
-    let mut state = ReleasedState::load(&app.state_dir);
-    let Some((key, saved)) = state
-        .released
-        .iter()
-        .find(|(k, _)| k.as_str() == backend_id)
-        .map(|(k, v)| (k.clone(), *v))
-    else {
-        return; // never released by us, so nothing to restore
+        None => state.swept.keys().cloned().collect(),
     };
 
     let detected = app.backend.discover().unwrap_or_default();
     let manager = manager(&detected);
-    let Ok(display) = display_for(manager.as_ref(), backend_id) else {
-        return;
-    };
-    if display.is_attached {
-        state.released.remove(&key);
-        let _ = state.save(&app.state_dir);
-        return;
+    let mut restored_any = false;
+
+    for key in keys {
+        let Some(windows) = state.swept.get(&key).cloned() else {
+            continue;
+        };
+        let report = manager.restore_windows(&windows)?;
+        app.log.append(
+            "desktop.restore",
+            &[
+                ("monitor", key.clone()),
+                ("restored", report.restored.len().to_string()),
+                ("missing", report.missing.len().to_string()),
+            ],
+        );
+
+        if !report.restored.is_empty() {
+            restored_any = true;
+            println!("Put {} window(s) back:", report.restored.len());
+            for title in &report.restored {
+                ui::bullet(title);
+            }
+        }
+        if !report.missing.is_empty() {
+            println!("\nCould not find {} window(s):", report.missing.len());
+            for title in &report.missing {
+                ui::bullet(title);
+            }
+            println!("  (closed, renamed, or on another virtual desktop)");
+        }
+        state.swept.remove(&key);
     }
 
-    match manager.attach(&display, saved) {
-        Ok(()) => {
-            state.released.remove(&key);
-            let _ = state.save(&app.state_dir);
-            println!("  {label:<10} reattached to this desktop");
-        }
-        Err(e) => ui::warn(format!("could not reattach `{label}`: {e}")),
+    state.save(&app.state_dir)?;
+    if !restored_any {
+        println!("None of the swept windows could be found.");
+        return Ok(1);
     }
+    Ok(0)
 }
+
+// ---------------------------------------------------------------------------

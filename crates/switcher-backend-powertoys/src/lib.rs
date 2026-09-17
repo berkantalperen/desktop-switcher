@@ -32,6 +32,25 @@ pub const TESTED_VERSIONS: &[&str] = &[TESTED_VERSION];
 
 pub const EXE_NAME: &str = "PowerToys.PowerDisplay.Cli";
 
+/// How many times to attempt a write the monitor has explicitly rejected.
+///
+/// These panels intermittently answer a perfectly good `setvcp` with
+/// "hardware write failed"; the same command a few seconds later succeeds.
+/// Three attempts turns that from a visible failure into a slightly slow
+/// switch.
+const WRITE_ATTEMPTS: usize = 3;
+const WRITE_RETRY_DELAY: Duration = Duration::from_millis(400);
+
+/// Whether the tool is telling us the write never reached the monitor.
+///
+/// Only these failures are safe to repeat. Anything vaguer could mean the
+/// write was accepted and the reply was lost, and repeating an input switch
+/// in that state is how a monitor ends up somewhere nobody asked for.
+fn is_definite_write_failure(run: &CommandRun) -> bool {
+    let text = format!("{}\n{}", run.stdout, run.stderr).to_lowercase();
+    text.contains("hardware write failed") || text.contains("failed to set vcp")
+}
+
 const NOT_RUNNING_HINT: &str =
     "Start PowerToys and enable the Power Display module, then try again.";
 
@@ -323,25 +342,50 @@ impl MonitorBackend for PowerDisplayBackend {
         value: InputCode,
     ) -> Result<WriteOutcome, BackendError> {
         let code = value.to_string();
-        let run = self.run(&[
-            "set",
-            "--monitor-id",
-            &monitor.backend_id,
-            "--input-source",
-            &code,
-        ])?;
+        let mut last: Option<BackendError> = None;
 
-        if run.success() {
-            // Deliberately not "switched": exit zero means the DDC write was
-            // dispatched, nothing more.
-            return Ok(WriteOutcome::Accepted);
+        for attempt in 1..=WRITE_ATTEMPTS {
+            let run = self.run(&[
+                "set",
+                "--monitor-id",
+                &monitor.backend_id,
+                "--input-source",
+                &code,
+            ])?;
+
+            if run.success() {
+                // Deliberately not "switched": exit zero means the DDC write
+                // was dispatched, nothing more.
+                return Ok(WriteOutcome::Accepted);
+            }
+
+            let error = classify_failure(&run);
+            if matches!(error, BackendError::MonitorNotFound { .. }) {
+                return Err(error);
+            }
+            // Retrying a write that might have been accepted is the one thing
+            // this project will not do, because a second input switch during
+            // re-enumeration compounds the disconnect. This branch is the
+            // exception: the tool has told us the write did not reach the
+            // monitor, so nothing is in flight to compound.
+            if !is_definite_write_failure(&run) {
+                return Ok(WriteOutcome::Failed {
+                    detail: error.to_string(),
+                });
+            }
+            last = Some(error);
+            if attempt < WRITE_ATTEMPTS {
+                std::thread::sleep(WRITE_RETRY_DELAY);
+            }
         }
-        match classify_failure(&run) {
-            e @ BackendError::MonitorNotFound { .. } => Err(e),
-            other => Ok(WriteOutcome::Failed {
-                detail: other.to_string(),
-            }),
-        }
+
+        Ok(WriteOutcome::Failed {
+            detail: format!(
+                "{} (after {WRITE_ATTEMPTS} attempts)",
+                last.map(|e| e.to_string())
+                    .unwrap_or_else(|| "write failed".into())
+            ),
+        })
     }
 }
 
@@ -398,6 +442,38 @@ mod tests {
             }
             other => panic!("unexpected classification: {other:?}"),
         }
+    }
+
+    /// Captured from the event log on 2026-09-17: the same switch that
+    /// worked seconds earlier and seconds later.
+    #[test]
+    fn a_rejected_hardware_write_is_recognised_as_safe_to_retry() {
+        let run = CommandRun {
+            program: "cli".into(),
+            args: vec!["set".into()],
+            status: Some(5),
+            stdout: String::new(),
+            stderr: "Error: hardware write failed\n  monitor: Monitor 3 (27P2DG5)\n  \
+                     diagnostic: Failed to set VCP 0x60"
+                .into(),
+            duration: Duration::ZERO,
+        };
+        assert!(is_definite_write_failure(&run));
+    }
+
+    #[test]
+    fn a_vague_failure_is_not_retried() {
+        // Could mean the write landed and the reply was lost, so repeating it
+        // could switch a monitor twice.
+        let run = CommandRun {
+            program: "cli".into(),
+            args: vec!["set".into()],
+            status: Some(1),
+            stdout: String::new(),
+            stderr: "Error: timed out waiting for the display".into(),
+            duration: Duration::ZERO,
+        };
+        assert!(!is_definite_write_failure(&run));
     }
 
     #[test]
