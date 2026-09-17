@@ -191,6 +191,11 @@ pub struct Config {
     pub switch_order: Option<Vec<String>>,
     #[serde(default)]
     pub monitors: Vec<MonitorConfig>,
+    /// Named sequences of steps the user composed, each optionally bound to a
+    /// hotkey. This is what the GUI edits and what the shortcut installers
+    /// bind.
+    #[serde(default)]
+    pub actions: Vec<crate::actions::Action>,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -221,6 +226,7 @@ impl Config {
             on_switch: SwitchSideEffects::default(),
             switch_order: None,
             monitors: Vec::new(),
+            actions: Vec::new(),
         }
     }
 
@@ -316,6 +322,8 @@ impl Config {
                 )));
             }
         }
+
+        crate::actions::validate_all(&self.actions).map_err(ConfigError::Invalid)?;
 
         if let Some(order) = &self.switch_order {
             for id in order {

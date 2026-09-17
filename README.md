@@ -176,6 +176,33 @@ nothing, so `switch` is input-only unless you ask otherwise.
 See [docs/troubleshooting.md](docs/troubleshooting.md) for what is known
 about the two that do not work.
 
+### Actions and the GUI
+
+An action is a named sequence of steps with an optional hotkey — "send the
+monitor to Ubuntu, sweep my windows back, and open my notes" is one intention
+and three commands, so this is where you compose them.
+
+```bash
+desktop-switcher actions                 # list them
+desktop-switcher run-action "Work on Ubuntu"
+```
+
+`desktop-switcher-gui` edits them, along with what each layer does on a plain
+switch. It owns no logic of its own: everything it *does* it does by invoking
+the CLI, so there is one implementation of the rules and the GUI cannot drift
+from it or skip a safety check. What it owns is the configuration file.
+
+It will not identify monitors or verify input codes — those need a human
+watching the screens, so they stay in `configure` and `test-input`.
+
+```powershell
+# Windows: app-control policy blocks running a GUI from WindowsApps, so it
+# goes in Programs and gets a Start Menu entry.
+$dir = "$env:LOCALAPPDATA\Programs\Desktop Switcher"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+Copy-Item target\release\desktop-switcher*.exe $dir -Force
+```
+
 ### Commands
 
 | Command | Writes? | Purpose |

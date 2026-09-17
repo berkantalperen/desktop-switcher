@@ -140,6 +140,15 @@ enum Command {
     /// Make a monitor this computer's primary display.
     Primary { monitor: Option<String> },
 
+    /// List the actions you have configured.
+    Actions,
+
+    /// Run a named action.
+    RunAction {
+        /// The action name, as shown by `actions`.
+        name: String,
+    },
+
     /// Live readings, alongside the last destination this tool requested.
     Status,
 
@@ -303,6 +312,8 @@ fn run() -> Result<i32> {
         Command::Claim { monitor } => desktop::claim(&app, monitor.as_deref()),
         Command::Sweep { monitor } => desktop::sweep(&app, monitor.as_deref()),
         Command::Primary { monitor } => desktop::set_primary(&app, monitor.as_deref()),
+        Command::Actions => commands::actions(&app),
+        Command::RunAction { name } => commands::run_action(&app, &name),
         Command::Status => commands::status(&app),
         Command::Toggle {
             dry_run,

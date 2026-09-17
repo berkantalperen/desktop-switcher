@@ -6,6 +6,7 @@ members = [
     "crates/switcher-backend-ddcutil",
     "crates/switcher-desktop",
     "crates/switcher-cli",
+    "crates/switcher-gui",
 ]
 
 [workspace.package]

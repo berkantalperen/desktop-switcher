@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use switcher_core::actions::ActionStep;
 use switcher_core::backend::Severity;
 use switcher_core::config::{
     AwayAction, Config, DestinationMapping, HomeAction, MonitorConfig, SwitchSideEffects,
@@ -621,6 +622,142 @@ fn print_switch_report(report: &SwitchReport) {
 
     if report.exit_code() != 0 {
         ui::print_recovery_note();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// actions
+// ---------------------------------------------------------------------------
+
+pub fn actions(app: &App) -> Result<i32> {
+    let config = require_config(app)?;
+    ui::heading("Actions");
+    if config.actions.is_empty() {
+        println!("  None configured yet.");
+        println!("\n  Add them in the GUI (`desktop-switcher-gui`), or by hand in");
+        println!("  {}", app.config_path.display());
+        return Ok(0);
+    }
+
+    for action in &config.actions {
+        println!();
+        println!(
+            "{}{}",
+            action.name,
+            action
+                .hotkey
+                .as_deref()
+                .map(|h| format!("   [{h}]"))
+                .unwrap_or_else(|| "   (no hotkey)".into())
+        );
+        for step in &action.steps {
+            ui::bullet(step.summary());
+        }
+        if action.needs_experimental() {
+            ui::field_cont("needs --experimental to run");
+        }
+    }
+    println!("\nRun one with: desktop-switcher run-action \"<name>\"");
+    Ok(0)
+}
+
+/// Execute a named action, step by step, stopping at the first failure.
+///
+/// Later steps generally assume the earlier ones happened — sweeping a
+/// monitor is pointless if the switch meant to send it away never occurred —
+/// so a failure stops the sequence rather than ploughing on.
+pub fn run_action(app: &App, name: &str) -> Result<i32> {
+    let config = require_config(app)?;
+    let action = config
+        .actions
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            anyhow!(
+                "no action called `{name}`. Configured: {}",
+                if config.actions.is_empty() {
+                    "none".to_string()
+                } else {
+                    config
+                        .actions
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )
+        })?
+        .clone();
+
+    action.validate().map_err(|e| anyhow!("{e}"))?;
+    if action.needs_experimental() && !app.experimental {
+        bail!(
+            "`{}` includes a display-topology step, which is not reliable yet. \
+             Pass --experimental to run it anyway.",
+            action.name
+        );
+    }
+
+    app.log.append(
+        "action.begin",
+        &[
+            ("name", action.name.clone()),
+            ("steps", action.steps.len().to_string()),
+        ],
+    );
+    ui::heading(&action.name);
+
+    for (index, step) in action.steps.iter().enumerate() {
+        println!(
+            "\n[{}/{}] {}",
+            index + 1,
+            action.steps.len(),
+            step.summary()
+        );
+        let code = run_step(app, step)?;
+        if code != 0 {
+            app.log.append(
+                "action.stop",
+                &[("name", action.name.clone()), ("step", step.summary())],
+            );
+            eprintln!(
+                "\nStopped: step {} of {} failed, so the rest were not run.",
+                index + 1,
+                action.steps.len()
+            );
+            return Ok(code);
+        }
+    }
+
+    app.log
+        .append("action.end", &[("name", action.name.clone())]);
+    println!("\nDone.");
+    Ok(0)
+}
+
+fn run_step(app: &App, step: &ActionStep) -> Result<i32> {
+    match step {
+        ActionStep::Switch { destination } => {
+            switch(app, destination, false, false, SwitchFlags::default())
+        }
+        ActionStep::Sweep { monitor } => desktop::sweep(app, monitor.as_deref()),
+        ActionStep::Release { monitor } => desktop::release(app, monitor.as_deref()),
+        ActionStep::Claim { monitor } => desktop::claim(app, monitor.as_deref()),
+        ActionStep::Primary { monitor } => desktop::set_primary(app, monitor.as_deref()),
+        ActionStep::Run { command, args } => {
+            // Started, not awaited: these are things like launching an editor,
+            // and blocking a hotkey until the user closes it would be wrong.
+            match std::process::Command::new(command).args(args).spawn() {
+                Ok(child) => {
+                    println!("  started (pid {})", child.id());
+                    Ok(0)
+                }
+                Err(e) => {
+                    eprintln!("  could not start `{command}`: {e}");
+                    Ok(1)
+                }
+            }
+        }
     }
 }
 
