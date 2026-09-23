@@ -1,0 +1,15 @@
+[package]
+name = "switcher-icon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# For build scripts only: embed the icon and a name in a Windows executable.
+build = ["dep:embed-resource"]
+
+# Nothing at runtime. The resource compiler is pulled in only by the `build`
+# feature, which only build scripts ask for.
+[dependencies]
+embed-resource = { version = "3.0.11", optional = true }

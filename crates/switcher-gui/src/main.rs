@@ -24,7 +24,14 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([820.0, 640.0])
             .with_min_inner_size([600.0, 440.0])
-            .with_title("Desktop Switcher"),
+            .with_title("Desktop Switcher")
+            // The same drawing that is embedded in the executable, so the
+            // window's taskbar button matches the tray and the Start Menu.
+            .with_icon(std::sync::Arc::new(egui::IconData {
+                rgba: switcher_icon::pixels(64),
+                width: 64,
+                height: 64,
+            })),
         ..Default::default()
     };
     eframe::run_native(

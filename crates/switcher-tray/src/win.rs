@@ -39,7 +39,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
 
-use crate::icon;
 use crate::menu::{self, Command, Entry};
 use crate::notice::{self, Notice};
 
@@ -381,7 +380,7 @@ fn sibling(name: &str) -> Option<PathBuf> {
 /// An icon from pixels drawn in code: a 32-bit colour bitmap with alpha, and
 /// the monochrome mask Windows still insists on.
 fn make_icon(size: u32) -> windows::core::Result<HICON> {
-    let rgba = icon::pixels(size);
+    let rgba = switcher_icon::pixels(size);
     unsafe {
         let header = BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,

@@ -11,6 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 switcher-core.workspace = true
+switcher-icon.workspace = true
+
+[build-dependencies]
+switcher-icon = { workspace = true, features = ["build"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [

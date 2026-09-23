@@ -8,6 +8,7 @@ members = [
     "crates/switcher-cli",
     "crates/switcher-gui",
     "crates/switcher-tray",
+    "crates/switcher-icon",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ switcher-core = { path = "crates/switcher-core" }
 switcher-backend-windows = { path = "crates/switcher-backend-windows" }
 switcher-backend-ddcutil = { path = "crates/switcher-backend-ddcutil" }
 switcher-desktop = { path = "crates/switcher-desktop" }
+switcher-icon = { path = "crates/switcher-icon" }
 
 anyhow = "1.0.99"
 clap = { version = "4.5.48", features = ["derive"] }

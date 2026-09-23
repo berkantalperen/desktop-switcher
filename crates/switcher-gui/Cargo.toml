@@ -11,5 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 switcher-core.workspace = true
+switcher-icon.workspace = true
 anyhow.workspace = true
 eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+[build-dependencies]
+switcher-icon = { workspace = true, features = ["build"] }

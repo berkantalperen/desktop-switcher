@@ -12,7 +12,6 @@
 // Elsewhere only the tests use the menu, icon and notice code.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-mod icon;
 mod menu;
 mod notice;
 #[cfg(windows)]

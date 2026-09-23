@@ -19,3 +19,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 toml.workspace = true
+
+[build-dependencies]
+switcher-icon = { workspace = true, features = ["build"] }
