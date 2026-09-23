@@ -177,6 +177,8 @@ pub struct RawDisplay {
     pub is_attached: bool,
     pub position: (i32, i32),
     pub size: (u32, u32),
+    /// `DISPLAYCONFIG_OUTPUT_TECHNOLOGY_*` for this path's target.
+    pub output_technology: Option<u32>,
 }
 
 impl RawDisplay {
@@ -212,6 +214,7 @@ fn raw_from(
         device_path,
         gdi_name: source_gdi_name(path).unwrap_or_default(),
         friendly_name: friendly_name(path).filter(|s| !s.is_empty()),
+        output_technology: output_technology(path),
         is_attached: active,
         position: if active { position } else { (0, 0) },
         size: if active { size } else { (0, 0) },
@@ -230,6 +233,24 @@ fn friendly_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
     };
     let ok = unsafe { DisplayConfigGetDeviceInfo(&mut request.header) };
     (ok == ERROR_SUCCESS.0 as i32).then(|| wide_to_string(&request.monitorFriendlyDeviceName))
+}
+
+/// Which connector the driver drives this path's target through.
+///
+/// Comes from the same query as the friendly name, so it costs nothing extra
+/// and is available for every path, attached or not.
+fn output_technology(path: &DISPLAYCONFIG_PATH_INFO) -> Option<u32> {
+    let mut request = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+            size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+            adapterId: path.targetInfo.adapterId,
+            id: path.targetInfo.id,
+        },
+        ..Default::default()
+    };
+    let ok = unsafe { DisplayConfigGetDeviceInfo(&mut request.header) };
+    (ok == ERROR_SUCCESS.0 as i32).then_some(request.outputTechnology.0 as u32)
 }
 
 fn same_display(candidate: &str, wanted: &str) -> bool {

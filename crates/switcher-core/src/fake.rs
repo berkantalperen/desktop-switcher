@@ -35,6 +35,11 @@ pub struct FakeMonitor {
     pub behavior: FakeBehavior,
     /// Set once this monitor has been written to and gone quiet.
     pub silent: bool,
+    /// An input this monitor claims regardless of the one it is really on.
+    ///
+    /// Real panels do this: one physically showing HDMI answered reads with
+    /// DisplayPort while another computer was driving it.
+    pub misreports: Option<InputCode>,
 }
 
 impl FakeMonitor {
@@ -57,6 +62,7 @@ impl FakeMonitor {
             ],
             behavior: FakeBehavior::Normal,
             silent: false,
+            misreports: None,
         }
     }
 
@@ -72,6 +78,12 @@ impl FakeMonitor {
 
     pub fn with_behavior(mut self, behavior: FakeBehavior) -> Self {
         self.behavior = behavior;
+        self
+    }
+
+    /// Make reads answer with `code` whatever the monitor is actually on.
+    pub fn reporting_input(mut self, code: InputCode) -> Self {
+        self.misreports = Some(code);
         self
     }
 
@@ -241,6 +253,9 @@ impl MonitorBackend for FakeBackend {
             return Ok(InputReading::ReadFailed {
                 detail: detail.clone(),
             });
+        }
+        if let Some(claimed) = m.misreports {
+            return Ok(InputReading::Value(claimed));
         }
         match m.current {
             Some(c) => Ok(InputReading::Value(c)),

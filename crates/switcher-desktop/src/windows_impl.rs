@@ -27,8 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::displayconfig;
 use crate::{
-    detach_is_safe, sweep_target, DesktopDisplay, DesktopError, DesktopManager, MovedWindow, Rect,
-    RestoreReport, SavedDisplayMode, SweepReport,
+    detach_is_safe, sweep_target, Connector, DesktopDisplay, DesktopError, DesktopManager,
+    MovedWindow, Rect, RestoreReport, SavedDisplayMode, SweepReport,
 };
 
 const SW_SHOWMAXIMIZED_FLAG: u32 = 3;
@@ -212,6 +212,7 @@ impl DesktopManager for WindowsDesktop {
                     device_path: raw.device_path,
                     friendly_name: raw.friendly_name,
                     is_internal: false,
+                    connector: raw.output_technology.map(Connector::from_output_technology),
                 };
                 display.is_internal = self.is_protected(&display);
                 display

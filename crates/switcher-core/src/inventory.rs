@@ -49,6 +49,8 @@ pub enum BindingProblem {
     },
     #[error("`{monitor}` is reachable over {transport}, which cannot carry VCP 0x60")]
     NotSwitchable { monitor: String, transport: String },
+    #[error("`{monitor}` is plugged into this computer but is not answering on the channel that carries input switching. The cable link is up, so this computer keeps drawing on it, but the panel is showing one of its other inputs and is not listening here. If that input has nothing plugged into it the panel has gone to sleep and nothing can reach it at all. Change it back with the monitor's own buttons.")]
+    PresentButSilent { monitor: String },
 }
 
 impl BindingProblem {
@@ -57,8 +59,29 @@ impl BindingProblem {
             BindingProblem::NotFound { monitor, .. }
             | BindingProblem::Ambiguous { monitor, .. }
             | BindingProblem::PortChanged { monitor, .. }
-            | BindingProblem::NotSwitchable { monitor, .. } => monitor,
+            | BindingProblem::NotSwitchable { monitor, .. }
+            | BindingProblem::PresentButSilent { monitor } => monitor,
         }
+    }
+
+    /// Whether some other layer could tell this apart from a missing display.
+    ///
+    /// A monitor backend only ever sees panels that answer DDC, so "gone" and
+    /// "here but silent" look identical from there. The desktop layer can see
+    /// the difference, so it gets the chance to say so.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, BindingProblem::NotFound { .. })
+    }
+
+    /// Restate a missing display as one that is present but not answering.
+    ///
+    /// Only a caller that can enumerate displays independently of DDC may do
+    /// this, and only when it has actually found the display.
+    pub fn as_present_but_silent(&self) -> Option<BindingProblem> {
+        self.is_not_found()
+            .then(|| BindingProblem::PresentButSilent {
+                monitor: self.monitor().to_string(),
+            })
     }
 }
 
@@ -365,5 +388,33 @@ mod tests {
         let set = bind(&config, &present);
         assert_eq!(set.unclaimed.len(), 1);
         assert_eq!(set.unclaimed[0].identity.backend_id, "port-z");
+    }
+
+    /// A panel that has gone quiet reads as missing here, and only a caller
+    /// that can see displays without DDC may say otherwise.
+    #[test]
+    fn a_silent_panel_can_be_restated_as_present() {
+        let config = config_with(vec![cfg_monitor("left", "port-a", Some("SN-L"))]);
+        let set = bind(&config, &[]);
+        let problem = &set.problems[0];
+        assert!(problem.is_not_found());
+
+        let refined = problem
+            .as_present_but_silent()
+            .expect("a not-found refines");
+        assert_eq!(refined.monitor(), "left");
+        assert!(refined.to_string().contains("not answering"));
+    }
+
+    /// Refining anything else would be inventing a diagnosis: an ambiguous or
+    /// miscabled monitor was found, and that is a different problem.
+    #[test]
+    fn only_a_missing_panel_can_be_restated() {
+        let config = config_with(vec![cfg_monitor("left", "port-a", Some("SN-L"))]);
+        let present = vec![detected("port-b", Some("SN-L"), Transport::DdcCi)];
+        let set = bind(&config, &present);
+        let problem = &set.problems[0];
+        assert!(!problem.is_not_found());
+        assert!(problem.as_present_but_silent().is_none());
     }
 }

@@ -69,6 +69,59 @@ impl Rect {
     }
 }
 
+/// The connector a display's signal physically arrives on, as the graphics
+/// driver reports it.
+///
+/// This is the only thing in the stack that describes the *wire* rather than
+/// the monitor's opinion of itself. A monitor's VCP 0x60 register says which
+/// input it was last told to show, which is not the same claim and can
+/// disagree with what the panel is displaying.
+///
+/// It is deliberately never turned into a monitor input code. Mapping
+/// DisplayPort to `0x0F` is a trap this project walked into once: on the
+/// machine it was written for, both external panels report DisplayPort
+/// because they hang off one DP MST chain, yet one of them shows this
+/// computer on HDMI-1 (`0x11`) — the dock converts after the hub. The driver
+/// describes its own end of the cable, not the socket at the monitor.
+/// Finding the code is what `test-input` and a pair of eyes are for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connector {
+    Vga,
+    Dvi,
+    Hdmi,
+    DisplayPort,
+    Internal,
+    Other(u32),
+}
+
+impl Connector {
+    /// From `DISPLAYCONFIG_OUTPUT_TECHNOLOGY_*`.
+    pub fn from_output_technology(value: u32) -> Self {
+        match value {
+            0 => Connector::Vga,
+            4 => Connector::Dvi,
+            5 => Connector::Hdmi,
+            10 => Connector::DisplayPort,
+            // Embedded DisplayPort and LVDS are both the built-in panel.
+            6 | 11 | 0x8000_0000 => Connector::Internal,
+            other => Connector::Other(other),
+        }
+    }
+}
+
+impl std::fmt::Display for Connector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Connector::Vga => write!(f, "VGA"),
+            Connector::Dvi => write!(f, "DVI"),
+            Connector::Hdmi => write!(f, "HDMI"),
+            Connector::DisplayPort => write!(f, "DisplayPort"),
+            Connector::Internal => write!(f, "built-in panel"),
+            Connector::Other(v) => write!(f, "output technology {v}"),
+        }
+    }
+}
+
 /// One display as this computer's desktop sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopDisplay {
@@ -84,6 +137,8 @@ pub struct DesktopDisplay {
     pub is_attached: bool,
     /// Internal laptop panel. Never detached: it is the recovery display.
     pub is_internal: bool,
+    /// The connector this computer's signal arrives on, when the driver says.
+    pub connector: Option<Connector>,
 }
 
 impl DesktopDisplay {
@@ -307,6 +362,7 @@ mod tests {
 
     fn display(name: &str, path: &str, rect: Rect, primary: bool) -> DesktopDisplay {
         DesktopDisplay {
+            connector: None,
             gdi_name: name.into(),
             device_path: path.into(),
             friendly_name: None,

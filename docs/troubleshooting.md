@@ -13,8 +13,10 @@ If a screen is blank or unresponsive:
    this tool never takes an action you cannot undo physically.
 2. On the laptop, the built-in panel remains available; Windows falls back to it
    when the external displays disappear.
-3. Once a screen is back, run `desktop-switcher switch <destination>` again.
-   Every switch sets an absolute input, so repeating it is safe and never cycles.
+3. Once a screen is back, run the same command again. Every switch sets an
+   absolute input, so repeating it is safe and never cycles — and the write
+   goes out even if the monitor claims it is already on that input, because
+   that claim is exactly what cannot be trusted during a recovery.
 
 ---
 
@@ -37,11 +39,47 @@ desktop-switcher test-input --monitor left --code 0x0F --destination ubuntu
 
 ### `... is not attached: nothing present matches serial ...`
 
-The configured panel is not there. It is off, unplugged, asleep, or connected to
-the other computer and not answering this one.
+The configured panel is not there at all: off, unplugged, or asleep. Nothing
+this computer can send will reach it.
 
 Fix: check `desktop-switcher monitors`. If the display is genuinely gone,
 nothing can switch it.
+
+### `... is plugged into this computer but is not answering`
+
+Different problem, same symptom in the display list. This computer is drawing
+on the display — the cable link is up, the EDID reads, Windows has it in the
+desktop — but DDC/CI gets no valid reply, so no input can be set.
+
+The panel is showing one of its *other* inputs. The link on this computer's
+input stays alive, which is why the display never disappears from Windows, but
+the monitor is not listening here.
+
+Two different situations produce it, and they need the same fix:
+
+- **The other input has no cable in it.** The panel finds no signal, goes into
+  power save, and its DDC engine stops answering anything. Observed here: a
+  panel whose HDMI and VGA sockets are empty answered normally while awake and
+  went silent within seconds of being sent to HDMI.
+- **The other input has a live source.** The panel serves DDC to whatever is on
+  the input it is displaying, and ignores this computer.
+
+Confirmed at the Windows API level, below this tool and below PowerToys:
+`GetVCPFeatureAndVCPFeatureReply` on that panel returns
+`ERROR_GRAPHICS_DDCCI_INVALID_MESSAGE_COMMAND` (`0xC0262589`) and its
+capabilities string comes back empty, while the panel showing this computer
+answers both normally. PowerToys drops it from `list` for the same reason.
+
+There is no software fix from this side, and that is the finding, not a gap:
+
+- **The monitor's own buttons** always work.
+- **Whatever is on the input it is currently showing** can switch it, when
+  there is anything there. If that socket is empty, nothing can — the panel is
+  asleep and the buttons are the only way.
+
+`doctor` and `monitors` both name this case explicitly rather than reporting
+the panel as missing, because the two need opposite responses — one is "go
+plug it in", the other is "you cannot get there from here".
 
 ### `... is ambiguous: N displays match`
 
@@ -107,6 +145,22 @@ by hand: **Settings → System → Display**, select the display you want, and
 tick **"Make this my main display"**. Windows repositions the rest for you.
 
 ## Windows
+
+### `An Application Control policy has blocked this file` (os error 4551)
+
+Smart App Control. It blocks unsigned executables it has no reputation for,
+and every rebuild is a new hash, so a binary that ran a minute ago is blocked
+after the next `cargo build`. It hits the installed copy, the copy on `PATH`
+and the one in `target/`, and it makes the CLI integration tests fail — they
+spawn the built binary.
+
+The library tests do not spawn anything and are unaffected, so
+`cargo test -p switcher-core` still exercises every rule.
+
+Fixing it means turning Smart App Control off in Windows Security → App &
+browser control, which cannot be turned back on without reinstalling Windows.
+That is a real decision about the machine and is not one this project should
+make for you; signing the binary is the other way out.
 
 ### The Power Display CLI cannot be found
 
@@ -178,6 +232,33 @@ publishes no serial at all.
 ---
 
 ## Monitors, generally
+
+### The tool says the input was set, and the monitor did not move
+
+Believe the monitor, not the tool, and read what the tool actually said. A
+successful read-back prints:
+
+```
+monitor stored 0x0F; it does not report what it displays
+```
+
+That is the whole truth available over DDC/CI. VCP 0x60 is a register: writing
+to it asks for an input, reading it returns what was last stored there. A panel
+that accepts the value and declines to act on it reads back exactly like one
+that switched. Observed here: a 27P2DG5 held `0x0F` for several minutes while
+displaying VGA.
+
+There is no VCP feature that answers "what are you displaying right now", which
+is why `test-input` asks a human and why only `user-confirmed` codes are usable
+in an unattended switch.
+
+One indirect signal: if the panel goes silent on DDC within a few seconds of a
+write, while Windows keeps the link up, the write *did* land and the panel
+moved to an input that is not this computer. That is a real answer to "did it
+move", and it is the only one available — but it only tells you the panel left,
+never that it arrived anywhere useful.
+
+
 
 ### Brightness changes work but input switching does not
 

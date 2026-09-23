@@ -25,10 +25,10 @@ human has confirmed.
 | E — shortcuts and packaging | **done on Windows** (Ctrl+Alt+1 / Ctrl+Alt+2); the GNOME installer is written but not yet run on the Z4 |
 | F — keyboard/mouse switching | out of scope for v1 |
 
-Gates A and B are met, and the round trip works: `switch ubuntu` then
-`switch windows` from the Z4 both moved the panel and confirmed it by
-reading the value back. Running the same command twice issues no second
-write.
+Gates A and B are met, and the round trip works: both directions moved the
+panel and confirmed it by reading the value back. Running the same command
+twice issues the write twice, on purpose — see "Repeating a set is not
+optional" below.
 
 The one caveat is scope, not correctness: only one of the two AOC panels is
 currently cabled to both computers, so "both monitors" is one monitor until a
@@ -59,9 +59,15 @@ individually.
 
 The rules the code actually enforces, each with tests behind it:
 
-- **Set, never cycle.** A switch writes an absolute input code for a named
-  destination. Nothing increments or steps through inputs, so pressing the same
-  shortcut twice is a no-op rather than a surprise.
+- **Set, never cycle.** A switch writes an absolute input code. Nothing
+  increments or steps through inputs, so pressing the same shortcut twice asks
+  for the same thing rather than landing somewhere new.
+- **Repeating a set is not optional.** The write always goes out, even when the
+  monitor claims to be on that input already. Skipping a redundant write looks
+  free and is a trap: the read is least trustworthy exactly when it matters,
+  because a panel driven by another computer can answer with a stale value. One
+  did — physically on HDMI, reporting DisplayPort — and the "already on it"
+  shortcut left no way back except the monitor's own buttons.
 - **Identity before addressing.** Monitors are bound by EDID serial and
   corroborated by connection id. Discovery-time numbers are never used to
   address a write, because they move when a display sleeps or a dock
@@ -70,18 +76,31 @@ The rules the code actually enforces, each with tests behind it:
   `unknown` → `reported` → `read-confirmed` → `write-confirmed` →
   `user-confirmed`. A capability listing is a claim, and claims do not authorise
   writes.
-- **Exit zero is not a switched monitor.** Outcomes are reported as
-  `confirmed by read`, `issued, visual state unconfirmed`, or `failed`. The
-  middle one is never rounded up.
+- **Exit zero is not a switched monitor, and neither is a read-back.** VCP
+  0x60 reports the value the monitor last *stored*, not the input it is
+  *displaying*. A panel here held `0x0F` for minutes while showing VGA the
+  whole time. So a matching read is reported as "monitor stored 0x0F; it does
+  not report what it displays", never as confirmation — the word "confirmed"
+  belongs only to a person who looked at the screen.
+- **The graphics driver does not know the monitor's input either.** It reports
+  its own end of the cable. Both panels here come up as DisplayPort off one MST
+  chain, and one of them shows this computer on HDMI-1, because the dock
+  converts downstream. The connector is printed as a fact and never turned
+  into an input code.
 - **Losing contact after switching away is expected, not a failure.** A monitor
   that has moved to the other computer stops answering this one. That is
   distinguished from a genuine read failure.
 - **Partial results are reported as partial.** No rollback is attempted: with
   connectivity unknown, "undoing" a write is just another blind write.
-- **Writes are never retried.** The first may already have been accepted, and
-  repeating it during re-enumeration compounds the disconnect.
+- **Writes are retried only on a provable failure.** A bounded retry runs when
+  the tool reported the write itself as failed. An unconfirmed write is never
+  retried: the first may already have been accepted, and repeating it during
+  re-enumeration compounds the disconnect.
 - **Read-only means read-only.** `doctor`, `monitors`, `inspect` and `status`
   cannot write. Tests assert it.
+- **"Missing" and "not answering" are different.** A panel that has gone quiet
+  on DDC still appears in `monitors` and in `doctor`, distinguished from one
+  that is genuinely unplugged, because the two need opposite responses.
 - **Unrecognised tool output is fatal.** If PowerToys or ddcutil changes its
   format, parsing fails loudly rather than guessing at a monitor id.
 

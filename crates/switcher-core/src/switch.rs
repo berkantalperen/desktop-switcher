@@ -119,14 +119,14 @@ pub struct StepReport {
     pub before: Option<InputReading>,
     pub outcome: WriteOutcome,
     pub after: Option<InputReading>,
-    /// Set when no write was issued because the monitor was already there.
-    pub skipped_already_correct: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyStatus {
-    /// Every monitor read back as requested.
-    AllConfirmed,
+    /// Every monitor stored the value we asked for. Says nothing about what
+    /// any of them is displaying — only the person in front of the screens
+    /// can say that.
+    AllStored,
     /// Every write was accepted, but at least one could not be verified.
     AllIssuedSomeUnconfirmed,
     Partial,
@@ -136,7 +136,9 @@ pub enum ApplyStatus {
 impl fmt::Display for ApplyStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            ApplyStatus::AllConfirmed => "confirmed",
+            ApplyStatus::AllStored => {
+                "every monitor stored the request; look at the screens to see if they moved"
+            }
             ApplyStatus::AllIssuedSomeUnconfirmed => {
                 "issued; could not be confirmed (expected if the input belongs to another computer)"
             }
@@ -164,9 +166,9 @@ impl ApplyReport {
         if self
             .steps
             .iter()
-            .all(|s| matches!(s.outcome, WriteOutcome::ConfirmedByRead(_)))
+            .all(|s| matches!(s.outcome, WriteOutcome::StoredByMonitor(_)))
         {
-            ApplyStatus::AllConfirmed
+            ApplyStatus::AllStored
         } else {
             ApplyStatus::AllIssuedSomeUnconfirmed
         }
@@ -175,7 +177,7 @@ impl ApplyReport {
     /// Exit code: 0 confirmed or issued, 1 partial, 2 total failure.
     pub fn exit_code(&self) -> i32 {
         match self.status() {
-            ApplyStatus::AllConfirmed | ApplyStatus::AllIssuedSomeUnconfirmed => 0,
+            ApplyStatus::AllStored | ApplyStatus::AllIssuedSomeUnconfirmed => 0,
             ApplyStatus::Partial => 1,
             ApplyStatus::AllFailed => 2,
         }
@@ -207,32 +209,21 @@ pub fn apply_one(
                 detail: "dry run: no write issued".into(),
             },
             after: None,
-            skipped_already_correct: false,
         };
     }
 
-    // Already there: the set is a no-op, so skip the write entirely. This is
-    // what makes pressing the same hotkey twice safe rather than a cycle.
-    if before.as_ref().and_then(|r| r.value()) == Some(plan.code) {
-        log.append(
-            "input.skip",
-            &[
-                ("monitor", plan.key.clone()),
-                ("code", plan.code.to_string()),
-                ("reason", "already-on-requested-input".into()),
-            ],
-        );
-        return StepReport {
-            key: plan.key.clone(),
-            label: plan.label.clone(),
-            requested: plan.code,
-            before,
-            outcome: WriteOutcome::ConfirmedByRead(plan.code),
-            after: None,
-            skipped_already_correct: true,
-        };
-    }
-
+    // The write always goes out, even when the monitor claims to be on this
+    // input already.
+    //
+    // Skipping on a matching read looks like a free optimisation and is a
+    // trap: the read is least trustworthy exactly when it matters, because a
+    // panel showing another computer can answer with a stale value. A monitor
+    // physically on HDMI reported DisplayPort, the set was skipped as
+    // redundant, and there was no way to get the screen back short of the
+    // monitor's own buttons.
+    //
+    // Repeating an absolute set is harmless — that is the whole reason this
+    // project never cycles inputs — so there is nothing to buy by skipping.
     let outcome = match backend.set_input(&plan.handle, plan.code) {
         Ok(o) => o,
         Err(e) => WriteOutcome::Failed {
@@ -257,7 +248,7 @@ pub fn apply_one(
         }
         let reading = read_after_write(backend, &plan.handle);
         final_outcome = match &reading {
-            InputReading::Value(v) if *v == plan.code => WriteOutcome::ConfirmedByRead(*v),
+            InputReading::Value(v) if *v == plan.code => WriteOutcome::StoredByMonitor(*v),
             InputReading::Value(v) => WriteOutcome::Unknown {
                 detail: format!("read back {v}, expected {}", plan.code),
             },
@@ -280,7 +271,6 @@ pub fn apply_one(
         before,
         outcome: final_outcome,
         after,
-        skipped_already_correct: false,
     }
 }
 
@@ -514,7 +504,7 @@ mod tests {
         let be = backend(HDMI, HDMI);
         let report = set(&cfg, &be, "SN-L", DP);
 
-        assert_eq!(report.outcome, WriteOutcome::ConfirmedByRead(InputCode(DP)));
+        assert_eq!(report.outcome, WriteOutcome::StoredByMonitor(InputCode(DP)));
         assert_eq!(be.writes(), vec![("port-a".to_string(), InputCode(DP))]);
         assert_eq!(be.current_input("port-b"), Some(InputCode(HDMI)));
     }
@@ -528,23 +518,58 @@ mod tests {
         assert!(plan_set_input(&cfg, &detected, "AOC 27P2DG5 (SN-L)", InputCode(DP)).is_ok());
     }
 
+    /// Regression: this used to skip the write when the monitor claimed to be
+    /// on the requested input already. A panel physically on one input
+    /// answered with another, the set was skipped as redundant, and the
+    /// screen could only be recovered with the monitor's own buttons.
     #[test]
-    fn setting_the_input_it_is_already_on_writes_nothing() {
+    fn a_matching_read_never_suppresses_the_write() {
         let cfg = config();
         let be = backend(HDMI, HDMI);
         let report = set(&cfg, &be, "SN-L", HDMI);
-        assert!(be.writes().is_empty(), "no write should be issued");
-        assert!(report.skipped_already_correct);
+
+        assert_eq!(
+            be.writes(),
+            vec![("port-a".to_string(), InputCode(HDMI))],
+            "the write must go out even when the read agrees"
+        );
+        assert_eq!(
+            report.outcome,
+            WriteOutcome::StoredByMonitor(InputCode(HDMI))
+        );
+    }
+
+    /// The same, with the read actively lying: it reports the input we are
+    /// asking for while the panel is on a different one.
+    #[test]
+    fn a_stale_read_cannot_block_recovery() {
+        let cfg = config();
+        let be = FakeBackend::new(vec![
+            FakeMonitor::new("port-a", Some("SN-L"), DP).reporting_input(InputCode(HDMI))
+        ]);
+
+        set(&cfg, &be, "SN-L", HDMI);
+
+        assert_eq!(
+            be.writes(),
+            vec![("port-a".to_string(), InputCode(HDMI))],
+            "a monitor that misreports its input must still be switchable"
+        );
     }
 
     #[test]
     fn repeating_a_set_is_idempotent() {
+        // Idempotent in effect, not in traffic: the second write goes out and
+        // simply lands the monitor where it already was. That is what makes a
+        // repeated hotkey safe, and it is why skipping the write bought
+        // nothing worth the risk of trusting a stale read.
         let cfg = config();
         let be = backend(HDMI, HDMI);
         set(&cfg, &be, "SN-L", DP);
-        let first = be.writes().len();
         set(&cfg, &be, "SN-L", DP);
-        assert_eq!(be.writes().len(), first, "second run must be a no-op");
+
+        assert_eq!(be.writes().len(), 2);
+        assert!(be.writes().iter().all(|(_, c)| *c == InputCode(DP)));
         assert_eq!(be.current_input("port-a"), Some(InputCode(DP)));
     }
 

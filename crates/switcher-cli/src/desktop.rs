@@ -216,6 +216,11 @@ pub fn displays(app: &App) -> Result<i32> {
         );
         ui::field("gdi name", &d.gdi_name);
         ui::field("device path", &d.device_path);
+        if let Some(connector) = d.connector {
+            // Describes this computer's end of the cable. Deliberately not
+            // turned into a monitor input code; see `Connector`.
+            ui::field("wired via", connector.to_string());
+        }
         ui::field(
             "attached",
             if d.is_attached {

@@ -167,18 +167,20 @@ fn a_monitor_can_be_named_by_its_label() {
     assert!(out.status.success(), "{}", combined(&out));
 }
 
+/// The write goes out even when the monitor claims to be on that input
+/// already. A read can be stale exactly when it matters — a panel physically on
+/// HDMI once reported DisplayPort, the set was skipped, and there was no way
+/// back — so a matching read is never a reason to stay quiet.
 #[test]
-fn setting_the_input_it_is_already_on_writes_nothing() {
+fn setting_the_input_it_is_already_on_still_writes() {
     let sandbox = Sandbox::new("idempotent");
     sandbox.write_config(config());
     // The fake left panel starts on 0x11.
     let out = sandbox.run(&["set", "FAKE-SN-L", "0x11"]);
     assert!(out.status.success(), "{}", combined(&out));
-    assert!(
-        stdout_of(&out).contains("already on that input"),
-        "{}",
-        stdout_of(&out)
-    );
+    let text = stdout_of(&out);
+    assert!(!text.contains("already on that input"), "{text}");
+    assert!(text.contains("stored 0x11"), "{text}");
 }
 
 #[test]

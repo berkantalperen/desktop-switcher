@@ -123,8 +123,15 @@ pub enum Evidence {
     /// wrong, incomplete, or list inputs the panel does not physically have.
     Reported,
     /// We read this value back from the monitor at some point.
+    ///
+    /// A register fact, not a picture fact: VCP 0x60 reports the value the
+    /// monitor last stored, which can differ from the input it is displaying.
     ReadConfirmed,
     /// We wrote the value and a subsequent read returned it.
+    ///
+    /// Still a register fact. It proves the monitor accepted and kept the
+    /// value, and nothing more — one panel held `0x0F` for several minutes
+    /// while displaying VGA the whole time.
     WriteConfirmed,
     /// A human watched the physical input change and said so. The only level
     /// that justifies using a code in an unattended switch.
@@ -327,7 +334,9 @@ impl fmt::Display for InputReading {
 pub enum WriteOutcome {
     /// Command returned success. Visual state unconfirmed.
     Accepted,
-    ConfirmedByRead(InputCode),
+    /// The monitor read the value back. It has told us what is in its input
+    /// register, which is not the same as what it is putting on the panel.
+    StoredByMonitor(InputCode),
     ConfirmedByUser,
     Failed {
         detail: String,
@@ -347,7 +356,7 @@ impl WriteOutcome {
     pub fn evidence(&self) -> Evidence {
         match self {
             WriteOutcome::ConfirmedByUser => Evidence::UserConfirmed,
-            WriteOutcome::ConfirmedByRead(_) => Evidence::WriteConfirmed,
+            WriteOutcome::StoredByMonitor(_) => Evidence::WriteConfirmed,
             _ => Evidence::Unknown,
         }
     }
@@ -357,7 +366,9 @@ impl fmt::Display for WriteOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WriteOutcome::Accepted => f.write_str("issued, visual state unconfirmed"),
-            WriteOutcome::ConfirmedByRead(c) => write!(f, "confirmed by read ({c})"),
+            WriteOutcome::StoredByMonitor(c) => {
+                write!(f, "monitor stored {c}; it does not report what it displays")
+            }
             WriteOutcome::ConfirmedByUser => f.write_str("confirmed by user"),
             WriteOutcome::Failed { detail } => write!(f, "failed: {detail}"),
             WriteOutcome::Unknown { detail } => write!(f, "unknown: {detail}"),
@@ -368,6 +379,39 @@ impl fmt::Display for WriteOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read-back is the monitor quoting its own register back at us. It is
+    /// not a witness to what the panel is displaying, and nothing shown to a
+    /// person may suggest that it is.
+    ///
+    /// Written after a panel stored `0x0F`, kept showing VGA, and was reported
+    /// as "confirmed by read (0x0F) ... confirmed".
+    #[test]
+    fn a_read_back_never_reports_itself_as_confirmation() {
+        let outcome = WriteOutcome::StoredByMonitor(InputCode(0x0F));
+        let text = outcome.to_string().to_lowercase();
+        assert!(
+            !text.contains("confirm"),
+            "a register read must not claim confirmation, said: {text}"
+        );
+        assert!(
+            text.contains("not") && text.contains("display"),
+            "it must say what it does not prove, said: {text}"
+        );
+    }
+
+    /// Only a person who watched the screen gets to use that word.
+    #[test]
+    fn only_a_human_confirms() {
+        assert!(WriteOutcome::ConfirmedByUser
+            .to_string()
+            .to_lowercase()
+            .contains("confirm"));
+        assert_eq!(
+            WriteOutcome::ConfirmedByUser.evidence(),
+            Evidence::UserConfirmed
+        );
+    }
 
     #[test]
     fn hex_prefixed_codes_parse() {

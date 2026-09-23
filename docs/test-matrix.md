@@ -18,9 +18,11 @@ They cover, among other things:
 | Arguments are passed as an array, so a serial containing a `;` cannot become a second command | `switcher-core::proc` |
 | Reordered discovery does not change which monitor a logical id binds to | `switcher-core::inventory` |
 | Duplicate serials, missing monitors and moved cables all block the switch instead of resolving to a guess | `switcher-core::inventory` |
+| A missing panel can be restated as present-but-silent, and nothing else can | `switcher-core::inventory` |
 | The internal laptop panel is never a switch target | `switcher-core::inventory` |
 | Each monitor is written its own code; nothing is batched | `switcher-core::switch` |
-| Requesting the destination a monitor is already on issues no write at all | `switcher-core::switch` |
+| A read that already matches never suppresses the write | `switcher-core::switch` |
+| A stale read cannot block a recovery | `switcher-core::switch` |
 | Losing DDC contact after switching away is not reported as a failure | `switcher-core::switch` |
 | A write that is accepted but ignored is not reported as success | `switcher-core::switch` |
 | One monitor failing yields a partial report, with no rollback attempted | `switcher-core::switch` |
@@ -63,7 +65,7 @@ available, and you can reach each monitor's on-screen menu by hand.
 | 6b | Readback tracks a manual OSD change | A change made with the monitor buttons is visible to the tool | **passed 2026-09-16** — five consecutive reads returned `0x11` after a manual switch back |
 | 7 | Both monitors, each direction | Both switch; per-monitor result and timing recorded | not run |
 | 8 | Mixed initial inputs | An explicit target converges both panels on the requested computer | not run |
-| 9 | Repeated same destination | No write is issued the second time; no cycling | **passed 2026-09-16** on hardware — second `switch windows` reported "already on the requested input; no write issued" |
+| 9 | Repeated same request | The same absolute code is written again; no cycling, no new input | **passed 2026-09-16** on hardware as a no-write skip; the skip was **removed 2026-09-17** after a panel physically on HDMI reported DisplayPort and the skip blocked the way back. Needs a re-run: expect two writes of the same code and no visible change. |
 | 10 | Monitor order changes (sleep, dock re-enumeration) | No write lands on the wrong display | not run |
 | 11 | Sleep / wake / dock reconnect | Re-enumeration is safe, or fails clearly | not run |
 | 12 | PowerToys closed, or `/dev/i2c` denied | Actionable error; no root requirement, no fallback to monitor 1 | not run |

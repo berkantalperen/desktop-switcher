@@ -11,9 +11,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use switcher_core::actions::ActionStep;
 use switcher_core::backend::Severity;
 use switcher_core::config::{Config, MonitorConfig, MonitorInput};
+use switcher_core::eventlog;
 use switcher_core::inventory;
 use switcher_core::switch::{self, ApplyReport, ExecOptions, LastRequest, SwitchGuard};
-use switcher_core::types::{DetectedMonitor, Evidence, InputCode, InputReading, MonitorIdentity};
+use switcher_core::types::{
+    DetectedMonitor, Evidence, InputCode, InputReading, MonitorIdentity, WriteOutcome,
+};
 
 use crate::desktop;
 use crate::ui;
@@ -89,8 +92,25 @@ pub fn doctor(app: &App) -> Result<i32> {
                             binding.detected.identity.describe()
                         );
                     }
+                    // A monitor backend only sees panels that answer DDC, so
+                    // "unplugged" and "here but not answering" arrive
+                    // identically. The desktop layer can tell them apart, and
+                    // the difference decides what the person should do next.
+                    let at_os_level = desktop::manager(&detected).displays().unwrap_or_default();
                     for problem in &bindings.problems {
-                        println!("  [BLOCKER] {problem}");
+                        let present = problem.is_not_found()
+                            && config.monitor(problem.monitor()).is_some_and(|m| {
+                                at_os_level
+                                    .iter()
+                                    .any(|d| d.matches_backend_id(&m.backend_id))
+                            });
+                        let refined = present.then(|| problem.as_present_but_silent()).flatten();
+                        let text = refined.as_ref().unwrap_or(problem).to_string();
+                        let mut lines = textwrap(&text, 66).into_iter();
+                        println!("  [BLOCKER] {}", lines.next().unwrap_or_default());
+                        for line in lines {
+                            println!("            {line}");
+                        }
                         blockers += 1;
                     }
                     for extra in &bindings.unclaimed {
@@ -126,7 +146,7 @@ pub fn monitors(app: &App) -> Result<i32> {
         .collect();
 
     ui::heading(&format!("Monitors ({})", app.backend.name()));
-    if switchable.is_empty() {
+    if switchable.is_empty() && app.config.is_none() {
         println!("  No monitor on this computer can have its input switched.");
         return Ok(1);
     }
@@ -196,6 +216,51 @@ pub fn monitors(app: &App) -> Result<i32> {
         }
     }
 
+    // Configured panels that did not answer are still yours, and hiding them
+    // makes a monitor look like it stopped existing when it has only stopped
+    // talking. Each one says which of the two it is.
+    let silent = unanswered(app, &switchable, &detected);
+    for (cfg, present) in &silent {
+        println!();
+        println!("{}", cfg.label);
+        ui::field("name it by", &cfg.key);
+        ui::field("connection", &cfg.backend_id);
+        ui::field(
+            "current input",
+            if *present {
+                "not answering"
+            } else {
+                "not present"
+            },
+        );
+
+        let mut first = true;
+        for input in &cfg.inputs {
+            let line = format!("{}  {}", input.input_code, input.display_name());
+            if first {
+                ui::field("inputs", line);
+                first = false;
+            } else {
+                ui::field_cont(line);
+            }
+        }
+
+        let why = if *present {
+            "This computer is drawing on it, so the cable is fine. The panel is              showing one of its other inputs and is not listening here — and if that              input has nothing plugged into it, the panel is asleep and nothing can              reach it at all. Use the monitor's own buttons."
+        } else {
+            "Nothing on this computer matches it right now, so no command here can              reach it."
+        };
+        let mut first = true;
+        for line in textwrap(why, 56) {
+            if first {
+                ui::field("why", line);
+                first = false;
+            } else {
+                ui::field_cont(line);
+            }
+        }
+    }
+
     let duplicates = inventory::duplicate_serials(&detected);
     if !duplicates.is_empty() {
         println!();
@@ -205,6 +270,40 @@ pub fn monitors(app: &App) -> Result<i32> {
         ));
     }
     Ok(0)
+}
+
+/// Configured monitors no DDC path reached, each paired with whether this
+/// computer can nonetheless see the display.
+fn unanswered<'a>(
+    app: &'a App,
+    switchable: &[&DetectedMonitor],
+    detected: &[DetectedMonitor],
+) -> Vec<(&'a MonitorConfig, bool)> {
+    let Some(config) = app.config.as_ref() else {
+        return Vec::new();
+    };
+    let missing: Vec<&MonitorConfig> = config
+        .monitors
+        .iter()
+        .filter(|cfg| {
+            !switchable
+                .iter()
+                .any(|d| find_configured(config, &d.identity).is_some_and(|c| c.key == cfg.key))
+        })
+        .collect();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let at_os_level = desktop::manager(detected).displays().unwrap_or_default();
+    missing
+        .into_iter()
+        .map(|cfg| {
+            let present = at_os_level
+                .iter()
+                .any(|d| d.matches_backend_id(&cfg.backend_id));
+            (cfg, present)
+        })
+        .collect()
 }
 
 /// Configured inputs when we have them, otherwise whatever the monitor says.
@@ -307,6 +406,23 @@ pub fn set_input(
         ));
     }
 
+    // The expensive mistake this tool can make is sending a monitor to an
+    // input with nothing on the other end. The panel sleeps, drops its link,
+    // and this computer loses it entirely -- at which point no command can
+    // reach it and only the monitor's own buttons will do.
+    let confidence = config
+        .monitor(monitor)
+        .and_then(|m| m.input(code))
+        .map(|i| i.verification)
+        .unwrap_or_default();
+    if confidence < Evidence::WriteConfirmed {
+        ui::warn(format!(
+            "nothing has confirmed there is a live source on {code} for this monitor \
+             (only `{confidence}`). If there is not, the monitor will drop off this \
+             computer and its own buttons will be the only way back."
+        ));
+    }
+
     let opts = ExecOptions {
         settle: Duration::from_millis(config.settle_ms),
         read_back: true,
@@ -315,6 +431,7 @@ pub fn set_input(
     let step = switch::apply_one(&plan, app.backend.as_ref(), opts, &app.log);
     if !dry_run {
         LastRequest::record(&app.state_dir, &request);
+        learn_from(app, monitor, code, &step);
     }
 
     let report = ApplyReport {
@@ -325,12 +442,65 @@ pub fn set_input(
     Ok(report.exit_code())
 }
 
+/// Record what a real switch just taught us about an input.
+///
+/// A monitor that reads back the input we asked for, and is still answering,
+/// demonstrably has a working link on it. A monitor that goes silent has told
+/// us something too — possibly that nothing is attached there — and that is
+/// worth remembering before someone sends it there again by reflex.
+///
+/// This is best effort: failing to record it must never turn a successful
+/// switch into an error.
+fn learn_from(app: &App, monitor: &str, code: InputCode, step: &switch::StepReport) {
+    let Some(config) = app.config.as_ref() else {
+        return;
+    };
+    let Some(existing) = config.monitor(monitor).and_then(|m| m.input(code)).cloned() else {
+        return;
+    };
+
+    let confirmed = matches!(step.outcome, WriteOutcome::StoredByMonitor(_));
+    let vanished = matches!(
+        step.after,
+        Some(InputReading::UnavailableAfterSwitch { .. })
+    );
+
+    let mut updated = existing.clone();
+    if confirmed && updated.verification < Evidence::WriteConfirmed {
+        updated.verification = Evidence::WriteConfirmed;
+        updated.note = Some(format!(
+            "Confirmed by reading it back on {}.",
+            eventlog::today()
+        ));
+    } else if vanished {
+        updated.note = Some(format!(
+            "On {}, the monitor stopped answering after this was selected. That is \
+             normal if another computer is on it, and is what it looks like when \
+             nothing is.",
+            eventlog::today()
+        ));
+    } else {
+        return;
+    }
+    if updated == existing {
+        return;
+    }
+
+    let mut next = config.clone();
+    if let Some(m) = next.monitor_mut(monitor) {
+        if let Some(slot) = m.input_mut(code) {
+            *slot = updated;
+        }
+    }
+    if let Err(e) = next.save(&app.config_path) {
+        ui::warn(format!("could not record what that switch showed: {e}"));
+    }
+}
+
 fn print_report(report: &ApplyReport) {
     for step in &report.steps {
         let detail = if report.dry_run {
             "would be set (dry run)".to_string()
-        } else if step.skipped_already_correct {
-            "already on that input; no write issued".to_string()
         } else {
             step.outcome.to_string()
         };
