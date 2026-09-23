@@ -72,16 +72,16 @@ the GUI (`desktop-switcher-gui`) or in `config.toml`, and run the installer
 again to bind the hotkeys. An action can set several monitors, move windows,
 or run any program.
 
-### Confirming an input
+### Finding which code is which
 
 Capability lists are claims, and routinely list inputs a monitor does not have.
-Until someone has watched an input work, every `set` to it prints a warning.
-That warning is there because sending a monitor to an input with no picture
-behind it puts the monitor to sleep (see below).
+The only way to learn which code shows which computer is to `set` it once and
+look at the screen — the monitor's own read-back cannot tell you (see the safety
+model). Give each input you find a label in `config.toml` ("Laptop",
+"Workstation"), and build your actions from those.
 
-There is not yet a command to record that you watched it work. For now, after
-seeing the switch happen, set `verification = "user-confirmed"` on that input
-in `config.toml`.
+Try codes where you know a computer with its screen **on** is plugged in: a
+monitor sent to an input with no picture goes to sleep (below).
 
 ---
 
@@ -123,7 +123,10 @@ The rules the code enforces, each with tests behind it:
   showing VGA. A matching read is reported as "monitor stored 0x0F; it does not
   report what it displays". The word "confirmed" belongs to a person who looked.
 - **Nothing is learned from a read-back.** It is never recorded as evidence
-  about an input, and it cannot silence the warning above.
+  about an input.
+- **Switching never asks anything.** It runs from hotkeys, so it neither
+  prompts nor prints warnings that would need a person to act on them; what
+  can go wrong is refused, waited out, or documented.
 - **Identity before addressing.** Monitors are bound by EDID serial and
   corroborated by connection. Discovery order is never used to address a write,
   because it moves when a display sleeps or re-enumerates. On Windows the serial

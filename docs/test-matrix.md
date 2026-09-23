@@ -32,7 +32,7 @@ They cover, among other things:
 | Mirrored displays and duplicate ids are refused; the built-in panel and detached displays are never addressed | `switcher-backend-windows::topology` |
 | A reshuffle is waited out; a desktop that stays mirrored, or a structural refusal, is still refused | `switcher-backend-windows::topology` |
 | A zero reply is a failed read, not an input; real AOC capabilities yield their advertised inputs | `switcher-backend-windows::topology` |
-| A read-back is never recorded as evidence, and the unverified-input warning survives use | `switcher-cli` integration tests |
+| A read-back is never recorded as evidence, and switching to a configured input prints nothing needing a person | `switcher-cli` integration tests |
 | The interface never names a computer | `switcher-cli` integration tests |
 | Read-only commands never create or write a configuration | `switcher-cli` integration tests |
 
@@ -89,9 +89,7 @@ organised around destination computers and the PowerToys backend.
 | 5, 6, 6c | Single monitor, each direction, and a full round trip | passed — issued from the Z4 and watched |
 | 6b | A manual OSD change is visible to the tool | passed |
 
-## Procedure: confirming an input
-
-This is how an input code earns `user-confirmed`.
+## Procedure: finding which code is which
 
 1. Pick **one** monitor and **one** code. Prefer one where you know a computer
    with its screen **on** is plugged into that socket.
@@ -101,8 +99,7 @@ This is how an input code earns `user-confirmed`.
 4. `desktop-switcher set <monitor> 0xNN`, and **look at the monitor**. The
    tool's own output cannot tell you whether it switched; a read-back only
    repeats what the monitor stored.
-5. If it showed what you expected, mark that input `verification =
-   "user-confirmed"` in `config.toml`. There is not yet a command for this.
+5. Note what it showed, and label that input accordingly in `config.toml`.
 6. Switch it back, and repeat for the next code.
 
 The most reliable proof is a switch you watched *arrive*: send the monitor to a

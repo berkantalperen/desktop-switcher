@@ -59,10 +59,9 @@ model = "REPLACE_AFTER_DISCOVERY"
 input_code = "0x11"
 # Whatever this input means to you.
 label = "Laptop"
-# unknown, reported, read-confirmed, write-confirmed or user-confirmed.
-# `configure` records what the monitor claims as `reported`. Only a person who
-# watched the switch happen should write `user-confirmed`; anything less makes
-# every switch to it print a warning.
+# What is known about this input: unknown, reported, read-confirmed,
+# write-confirmed or user-confirmed. `configure` records what the monitor
+# claims as `reported`. Informational only; switching never depends on it.
 verification = "reported"
 
 [[monitors.inputs]]

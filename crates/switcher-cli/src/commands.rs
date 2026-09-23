@@ -446,25 +446,11 @@ pub fn set_input(
         ));
     }
 
-    // The expensive mistake this tool can make is sending a monitor to an
-    // input with nothing on the other end. The panel sleeps, drops its link,
-    // and this computer loses it entirely -- at which point no command can
-    // reach it and only the monitor's own buttons will do.
-    let confidence = config
-        .monitor(monitor)
-        .and_then(|m| m.input(code))
-        .map(|i| i.verification)
-        .unwrap_or_default();
-    // Only a person who watched the screen knows there is a live source on
-    // an input. Nothing the monitor says over DDC can stand in for that, so
-    // nothing short of `user-confirmed` quiets this.
-    if !confidence.is_trusted_for_switching() {
-        ui::warn(format!(
-            "nothing has confirmed there is a live source on {code} for this monitor \
-             (only `{confidence}`). If there is not, the monitor will drop off this \
-             computer and its own buttons will be the only way back."
-        ));
-    }
+    // No warning about whether anyone has watched this input work. This runs
+    // from hotkeys, where nobody reads output and nobody can be asked
+    // anything, and a warning that nothing short of editing the config can
+    // clear is just noise. What happens when an input has no picture behind
+    // it is documented instead.
 
     let opts = ExecOptions {
         settle: Duration::from_millis(config.settle_ms),

@@ -201,22 +201,20 @@ fn a_read_back_is_never_recorded_as_evidence() {
     assert!(!saved.contains("read-confirmed"), "{saved}");
 }
 
-/// The warning about an unverified input is the only thing standing between
-/// a person and a monitor asleep on an empty socket. Using an input once must
-/// not be enough to silence it; only someone watching the screen can.
+/// This runs from hotkeys. Switching to a configured input says nothing it
+/// would need a person to act on — no warning about whether anyone has
+/// watched the input work, however it is recorded in the configuration.
 #[test]
-fn the_unverified_input_warning_survives_use() {
-    let sandbox = Sandbox::new("warning-sticks");
+fn switching_to_a_configured_input_is_quiet() {
+    let sandbox = Sandbox::new("quiet");
     sandbox.write_config(config());
-    for attempt in 1..=2 {
-        let out = sandbox.run(&["set", "FAKE-SN-L", "0x0F"]);
-        assert!(out.status.success(), "{}", combined(&out));
-        assert!(
-            combined(&out).contains("nothing has confirmed"),
-            "attempt {attempt} did not warn: {}",
-            combined(&out)
-        );
-    }
+    let out = sandbox.run(&["set", "FAKE-SN-L", "0x0F"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    assert!(
+        !combined(&out).to_lowercase().contains("warning"),
+        "{}",
+        combined(&out)
+    );
 }
 
 #[test]

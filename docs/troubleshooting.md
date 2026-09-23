@@ -62,15 +62,11 @@ action, not in the tool.
 
 ## Messages from `set` and `run-action`
 
-### warning: `nothing has confirmed there is a live source on 0xNN`
+### warning: `0xNN is not in this monitor's advertised input list`
 
-Nobody has recorded watching this input work. Capability strings routinely list
-inputs a monitor does not have, and sending a monitor to an input with no
-picture puts it to sleep (above). The write still goes out.
-
-To stop the warning once you have watched the switch happen, set
-`verification = "user-confirmed"` on that input in `config.toml`. There is not
-yet a command for it.
+The code is not among the inputs configured for this monitor — often a typo.
+The write still goes out, because capability lists are wrong often enough that
+an unlisted code can be right.
 
 ### `monitor stored 0x0F; it does not report what it displays`
 
@@ -123,8 +119,8 @@ recorded. A cable moved, and the recorded codes describe which of the monitor's
 sockets each computer used — which may no longer be true.
 
 Fix: run `desktop-switcher configure` to record the new connection, then
-re-check each input by switching to it and watching, and mark the ones you saw
-work as `user-confirmed`.
+switch to each input once and look, since the codes may have moved with the
+cable. Update the labels in `config.toml` if they did.
 
 ---
 
