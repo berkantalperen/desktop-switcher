@@ -33,8 +33,8 @@ Building needs Rust 1.82 or newer.
 ## Install
 
 ```powershell
-# Windows, after `cargo build --release`.
-# Installs the CLI and GUI, adds a Start Menu entry, binds your hotkeys.
+# Windows, after `cargo build --release`. Installs the CLI, the GUI and the
+# tray icon, starts the tray and has it start at login, binds your hotkeys.
 .\scripts\install-windows.ps1
 ```
 
@@ -183,6 +183,27 @@ is the configuration file.
 
 ---
 
+## Tray icon (Windows)
+
+`desktop-switcher-tray` puts a small monitor icon in the notification area. One
+click — left or right — opens a menu of your actions, with their hotkeys, and a
+submenu per monitor listing its inputs. Choosing one runs the CLI exactly as a
+hotkey does, without a console window.
+
+- It re-reads the configuration every time the menu opens, so changes made in
+  the GUI appear on the next click.
+- A monitor's submenu lists only the inputs you have named. Inputs still
+  carrying their standard name ("VGA-1") are usually sockets the monitor merely
+  claims, and one click would put it to sleep on an empty one; with nothing
+  named, every input is listed.
+- It is silent when a switch works. When one does not, it shows a notification
+  with the reason, taken from the CLI's report.
+- Only one runs at a time. To keep it visible, drag it out of the `^` overflow
+  onto the taskbar, or turn it on under **Settings → Personalization → Taskbar
+  → Other system tray icons**.
+
+---
+
 ## Keyboard shortcuts
 
 Both installers read your actions from the configuration, bind each hotkey to
@@ -205,6 +226,7 @@ crates/
   switcher-desktop/           this computer's desktop: topology, window sweeps
   switcher-cli/               command surface
   switcher-gui/               configuration editor that drives the CLI
+  switcher-tray/              notification-area menu that drives the CLI (Windows)
 docs/
   hardware-inventory.md       captured evidence from the machines it was built on
   test-matrix.md              what is tested, and the hardware procedure
