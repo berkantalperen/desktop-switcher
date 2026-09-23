@@ -1,279 +1,194 @@
 # desktop-switcher
 
-One command on whichever computer you are using points both external monitors at
-a named computer, over DDC/CI.
+Switch which input your monitors are showing, from the keyboard, over DDC/CI.
 
 ```bash
-desktop-switcher switch ubuntu
+desktop-switcher set ASFPA9A001108 0x0F     # one monitor, one input
+desktop-switcher run-action Workstation     # several monitors, one keypress
 ```
 
-Two AOC 27P2DG5 panels are shared between a Windows laptop and an Ubuntu
-workstation. Each monitor's input is set explicitly, per monitor, to a code a
-human has confirmed.
+Built for monitors shared between computers: the same screens, cabled to a
+laptop and a workstation, flipped between them with one hotkey on either
+machine. It knows about **monitors and their inputs**, and nothing about the
+computers behind them. What an input *means* — "Laptop", "Workstation" — is a
+name you give it.
 
----
-
-## Status
-
-| Stage | State |
-|---|---|
-| A — Windows discovery and evidence | **done**, see [docs/hardware-inventory.md](docs/hardware-inventory.md) |
-| A — Ubuntu discovery | **done** — the panel is identified by the same serial from both computers |
-| B — hardware verification of input codes | **done for the shared monitor** — both codes user-confirmed |
-| C — Rust workspace, backends, CLI | **done** — builds, tests and runs natively on both computers; both backends validated against real tool output |
-| D — switch transaction | **working on hardware** from the Z4, both directions confirmed by read. The Windows side still needs its own `configure`. |
-| E — shortcuts and packaging | **done on Windows** (Ctrl+Alt+1 / Ctrl+Alt+2); the GNOME installer is written but not yet run on the Z4 |
-| F — keyboard/mouse switching | out of scope for v1 |
-
-Gates A and B are met, and the round trip works: both directions moved the
-panel and confirmed it by reading the value back. Running the same command
-twice issues the write twice, on purpose — see "Repeating a set is not
-optional" below.
-
-The one caveat is scope, not correctness: only one of the two AOC panels is
-currently cabled to both computers, so "both monitors" is one monitor until a
-second cable goes into the other panel.
-
-**`switch` will refuse to run until Stage B is complete.** That is deliberate,
-not an unfinished edge: no input code becomes usable until someone has watched
-it work.
-
----
-
-## The finding that shaped the design
-
-The two panels use **different input codes for the same computer**:
-
-| Panel | Shows Windows via |
-|---|---|
-| serial `ASFPA9A001108` | HDMI-1 (`0x11`) |
-| serial `ASFPA9A001109` | DisplayPort-1 (`0x0F`) |
-
-"Switch both monitors to Windows" is therefore two different writes, not one
-value broadcast to two displays. Every monitor is handled and reported
-individually.
-
----
-
-## Safety model
-
-The rules the code actually enforces, each with tests behind it:
-
-- **Set, never cycle.** A switch writes an absolute input code. Nothing
-  increments or steps through inputs, so pressing the same shortcut twice asks
-  for the same thing rather than landing somewhere new.
-- **Repeating a set is not optional.** The write always goes out, even when the
-  monitor claims to be on that input already. Skipping a redundant write looks
-  free and is a trap: the read is least trustworthy exactly when it matters,
-  because a panel driven by another computer can answer with a stale value. One
-  did — physically on HDMI, reporting DisplayPort — and the "already on it"
-  shortcut left no way back except the monitor's own buttons.
-- **Identity before addressing.** Monitors are bound by EDID serial and
-  corroborated by connection id. Discovery-time numbers are never used to
-  address a write, because they move when a display sleeps or a dock
-  re-enumerates. If a monitor cannot be identified uniquely, the tool refuses.
-- **Only user-confirmed codes are switchable.** Evidence is tracked as
-  `unknown` → `reported` → `read-confirmed` → `write-confirmed` →
-  `user-confirmed`. A capability listing is a claim, and claims do not authorise
-  writes.
-- **Exit zero is not a switched monitor, and neither is a read-back.** VCP
-  0x60 reports the value the monitor last *stored*, not the input it is
-  *displaying*. A panel here held `0x0F` for minutes while showing VGA the
-  whole time. So a matching read is reported as "monitor stored 0x0F; it does
-  not report what it displays", never as confirmation — the word "confirmed"
-  belongs only to a person who looked at the screen.
-- **The graphics driver does not know the monitor's input either.** It reports
-  its own end of the cable. Both panels here come up as DisplayPort off one MST
-  chain, and one of them shows this computer on HDMI-1, because the dock
-  converts downstream. The connector is printed as a fact and never turned
-  into an input code.
-- **Losing contact after switching away is expected, not a failure.** A monitor
-  that has moved to the other computer stops answering this one. That is
-  distinguished from a genuine read failure.
-- **Partial results are reported as partial.** No rollback is attempted: with
-  connectivity unknown, "undoing" a write is just another blind write.
-- **Writes are retried only on a provable failure.** A bounded retry runs when
-  the tool reported the write itself as failed. An unconfirmed write is never
-  retried: the first may already have been accepted, and repeating it during
-  re-enumeration compounds the disconnect.
-- **Read-only means read-only.** `doctor`, `monitors`, `inspect` and `status`
-  cannot write. Tests assert it.
-- **"Missing" and "not answering" are different.** A panel that has gone quiet
-  on DDC still appears in `monitors` and in `doctor`, distinguished from one
-  that is genuinely unplugged, because the two need opposite responses.
-- **Unrecognised tool output is fatal.** If PowerToys or ddcutil changes its
-  format, parsing fails loudly rather than guessing at a monitor id.
+Runs natively on Windows and Linux. On Windows there is nothing else to
+install.
 
 ---
 
 ## Requirements
 
-Both are external runtime dependencies. The binary is not self-contained.
-
 | Host | Needs |
 |---|---|
-| Windows | [PowerToys](https://learn.microsoft.com/en-us/windows/powertoys/) with the Power Display module enabled and running. Tested against 0.101.2362.0. |
-| Ubuntu | [`ddcutil`](https://www.ddcutil.com/) (`sudo apt install ddcutil`), `i2c-dev` loaded, and `/dev/i2c-*` readable without `sudo`. |
+| Windows 10/11 | Nothing. Monitors are driven through Windows' own DDC/CI API. |
+| Linux | [`ddcutil`](https://www.ddcutil.com/) (`sudo apt install ddcutil`), the `i2c-dev` module loaded, and `/dev/i2c-*` readable without `sudo`. |
 
+DDC/CI must be enabled in each monitor's own menu; most ship with it on.
 Building needs Rust 1.82 or newer.
 
 ---
 
-## Build
-
-```bash
-cargo build --release
-```
-
-The binary lands at `target/release/desktop-switcher` (`.exe` on Windows).
-Build on each platform natively; there is no cross-compilation step.
-
-To put it somewhere on `PATH`, so it works from any directory and from a
-keyboard shortcut:
+## Install
 
 ```powershell
-# Windows: this directory is already on PATH for the current user.
-Copy-Item target\release\desktop-switcher.exe "$env:LOCALAPPDATA\Microsoft\WindowsApps\"
+# Windows, after `cargo build --release`.
+# Installs the CLI and GUI, adds a Start Menu entry, binds your hotkeys.
+.\scripts\install-windows.ps1
 ```
 
 ```bash
-# Linux: ~/.local/bin is on PATH on most desktop installs.
-install -Dm755 target/release/desktop-switcher ~/.local/bin/desktop-switcher
+# Linux
+cargo build --release
+install -Dm755 target/release/desktop-switcher ~/.local/bin/
+install -Dm755 target/release/desktop-switcher-gui ~/.local/bin/
+./scripts/install-gnome-shortcuts.sh     # GNOME hotkeys for your actions
 ```
 
-Neither needs elevation, and uninstalling is deleting the file.
+The Windows script stops a running GUI first and checks every copy landed.
+Windows silently refuses to overwrite a running executable, which leaves an old
+binary reading your configuration with old rules; that is confusing enough to
+be worth a script. Nothing needs elevation, and uninstalling is deleting the
+files.
 
 ---
 
 ## Getting started
 
-Nothing here writes to a monitor until step 4, which asks first.
-
 ```bash
-# 1. Check the backend, permissions and identification. Read-only.
-desktop-switcher doctor
-
-# 2. See what this computer can identify. Read-only.
-desktop-switcher monitors
-
-# 3. Identify the panels and record the code for THIS computer.
-#    Interactive; establishes half the mapping with no writes at all.
-desktop-switcher configure
-
-# 4. Establish the code for the OTHER computer. One monitor, one code,
-#    one confirmation, and it asks what you physically saw.
-desktop-switcher test-input --monitor left --code 0x0F --destination ubuntu
-
-# 5. Once every mapping is user-confirmed:
-desktop-switcher switch ubuntu
+desktop-switcher doctor      # read-only: backend, permissions, identification
+desktop-switcher monitors    # read-only: every monitor, its inputs, what it shows
+desktop-switcher configure   # name the monitors and record their inputs
+desktop-switcher set <monitor> 0x0F     # switch one, and watch the screen
 ```
 
-Step 4 is the only way a code becomes usable. See
-[docs/test-matrix.md](docs/test-matrix.md) for the full procedure.
+A monitor can be named by its label, or by the key `monitors` prints (its EDID
+serial). Input codes are the monitor's own VCP 0x60 values, always written with
+`0x`; `monitors` lists the ones each monitor claims.
+
+Then compose **actions** — a named list of steps with an optional hotkey — in
+the GUI (`desktop-switcher-gui`) or in `config.toml`, and run the installer
+again to bind the hotkeys. An action can set several monitors, move windows,
+or run any program.
+
+### Confirming an input
+
+Capability lists are claims, and routinely list inputs a monitor does not have.
+Until someone has watched an input work, every `set` to it prints a warning.
+That warning is there because sending a monitor to an input with no picture
+behind it puts the monitor to sleep (see below).
+
+There is not yet a command to record that you watched it work. For now, after
+seeing the switch happen, set `verification = "user-confirmed"` on that input
+in `config.toml`.
+
+---
+
+## When a screen goes dark
+
+A monitor sent to an input with **no picture** goes to sleep after a few
+seconds: nothing plugged in there, or the computer there has turned its screen
+off. **A sleeping monitor ignores DDC/CI entirely** — reads and writes alike —
+so no command from any computer can bring it back. It wakes on its own when a
+picture arrives on the input it is set to.
+
+So:
+
+- **The monitor's own buttons always work.** Open its menu and pick an input.
+- **Waking the computer on that input works too.** Touch its keyboard or mouse,
+  and the monitor wakes with it.
+- Switching to a computer that has blanked its screens gives you dark screens
+  until you use that computer, exactly like a hardware KVM.
+
+The one case with no software way out: sending your monitors to a computer
+that is asleep, then wanting them back *without touching that computer*. Use
+the buttons.
+
+---
+
+## Safety model
+
+The rules the code enforces, each with tests behind it:
+
+- **Set, never cycle.** A switch writes an absolute input code. Nothing steps
+  through inputs, so pressing a hotkey twice asks for the same thing twice
+  rather than landing somewhere new.
+- **The write always goes out,** even when the monitor claims to be on that
+  input already. The read is least trustworthy exactly when it matters: a panel
+  physically on HDMI once reported DisplayPort, and skipping the "redundant"
+  write left no way back but its buttons.
+- **A read-back is not confirmation.** VCP 0x60 returns the value a monitor last
+  *stored*, not the input it is *displaying* — one held `0x0F` for minutes while
+  showing VGA. A matching read is reported as "monitor stored 0x0F; it does not
+  report what it displays". The word "confirmed" belongs to a person who looked.
+- **Nothing is learned from a read-back.** It is never recorded as evidence
+  about an input, and it cannot silence the warning above.
+- **Identity before addressing.** Monitors are bound by EDID serial and
+  corroborated by connection. Discovery order is never used to address a write,
+  because it moves when a display sleeps or re-enumerates. On Windows the serial
+  is checked again immediately before every write, so a moved cable cannot
+  redirect one.
+- **Refuse rather than guess.** Two displays with one serial, or (on Windows) a
+  desktop set to *mirror* rather than extend, cannot be told apart reliably, so the tool
+  refuses to write to them and says why.
+- **On Windows, discovery never talks to the monitor.** A monitor is listed
+  because the OS says it is plugged in. Whether it answers a particular request is reported on
+  that request and never decides whether it exists. (PowerToys, which the
+  Windows backend used to drive, hid any monitor whose capabilities string it
+  could not read — a long transfer some cables cannot carry even when every
+  short command a switch needs gets through.)
+- **Windows' re-detection is waited out, not refused.** For a second or two
+  after a monitor changes input, Windows' view of the displays is wrong — a
+  panel missing, or two shown as mirrored. A write waits for it to settle. Reads
+  do not, so a hotkey is never slowed by one.
+- **Writes are retried only when the OS reports them failed,** and are safe to
+  repeat because they are absolute.
+- **Partial results are reported as partial,** and an action stops at the first
+  failed step. Nothing is "rolled back": with the monitor's state unknown, an
+  undo is just another blind write.
+- **Read-only commands stay read-only.** `doctor`, `monitors`, `status` and
+  `displays` cannot write, and tests assert it.
+- **The built-in laptop panel is never a target and never detached.** It is
+  recognised from the graphics driver itself, not from any one backend's say-so.
 
 ---
 
 ## Commands
 
-### Layer 2 — this computer's desktop
-
-Separate from the monitor's input. Both computers can have the same monitor
-attached at once, which is why a window can strand on a screen showing the
-other machine.
-
-| Command | State |
-|---|---|
-| `displays` | working |
-| `sweep` — move windows off, stay attached | working |
-| `primary` — make a monitor primary | unreliable on this driver |
-| `release` / `claim` — detach and reattach | **not working**; the legacy Win32 detach is rejected by this driver |
-
-`switch --sweep`, `--release` and `--claim` apply one of these as part of a
-switch, and `[on_switch]` sets what a bare `switch` does. Both default to
-nothing, so `switch` is input-only unless you ask otherwise.
-
-See [docs/troubleshooting.md](docs/troubleshooting.md) for what is known
-about the two that do not work.
-
-### Actions and the GUI
-
-An action is a named sequence of steps with an optional hotkey — "send the
-monitor to Ubuntu, sweep my windows back, and open my notes" is one intention
-and three commands, so this is where you compose them.
-
-```bash
-desktop-switcher actions                 # list them
-desktop-switcher run-action "Work on Ubuntu"
-```
-
-`desktop-switcher-gui` edits them, along with what each layer does on a plain
-switch. It owns no logic of its own: everything it *does* it does by invoking
-the CLI, so there is one implementation of the rules and the GUI cannot drift
-from it or skip a safety check. What it owns is the configuration file.
-
-It will not identify monitors or verify input codes — those need a human
-watching the screens, so they stay in `configure` and `test-input`.
-
-```powershell
-# Installs both binaries, adds a Start Menu entry, and binds your hotkeys.
-.\scripts\install-windows.ps1
-```
-
-It stops a running GUI first and verifies each copy landed. Windows locks a
-running executable, so copying over one silently fails — which leaves an old
-binary reading the configuration with last week's rules, and is confusing
-enough to be worth a script.
-
-The GUI does not go in `WindowsApps`: an Application Control policy can block
-launching it from there. The CLI is copied there too, since that directory is
-already on `PATH`.
-
-### Commands
-
 | Command | Writes? | Purpose |
 |---|---|---|
+| `monitors` | no | Every monitor, its inputs, and what it reports it is showing |
+| `set <monitor> <code>` | **yes** | Set one monitor to one input (`--dry-run` to only plan it) |
+| `run-action <name>` | **yes** | Run a configured action |
+| `actions` | no | List configured actions and their hotkeys |
+| `configure` | config only | Record which monitors exist and what inputs they offer |
 | `doctor` | no | Backend, permissions, configuration and identification checks |
-| `monitors` | no | Displays this computer can identify right now |
-| `inspect [id]` | no | Claims, current reading, write-test status and configured mapping, kept separate |
-| `status` | no | Live readings alongside the last destination *requested*, clearly distinguished |
-| `configure` | no | Interactive identification and mapping |
-| `test-input` | **yes**, after confirmation | Verify one code on one monitor |
-| `switch <dest>` | **yes** | Set every monitor to a destination |
-| `toggle` | **yes** | Switch to the other computer, only when the current state is unambiguous |
+| `status` | no | What each monitor reports, alongside the last thing requested |
+| `displays` | no | This computer's desktop: attached displays, connectors, layout |
+| `sweep [monitor]` | windows only | Move windows off a monitor, leaving the display alone |
+| `restore-windows` | windows only | Put swept windows back |
+| `release` / `claim` / `primary` | topology | Detach, reattach, or make primary. **Experimental**, behind `--experimental`: on the hardware this was built against they have left displays mirrored. |
 
-Useful flags: `--dry-run` on `switch`, `--backend fake` to try any command
-against in-memory monitors, `--config <path>`, `--tool-path <path>`.
+Global flags: `--config <path>`, `--backend windows|ddcutil|fake` (`fake` is
+in-memory monitors, for trying commands with no hardware), `--tool-path` for
+`ddcutil`. Exit codes: `0` success, `1` partial, `2` refused or failed.
 
-Exit codes: `0` success, `1` partial, `2` refused or total failure.
+The GUI owns no logic: everything it *does* it does by running the CLI, so there
+is one implementation of the rules and the GUI cannot skip a check. What it owns
+is the configuration file.
 
 ---
 
 ## Keyboard shortcuts
 
-Bind the two explicit destinations separately. `toggle` is available but binding
-it is not recommended until the current-state logic has been proven on hardware:
-after someone changes an input with the monitor buttons, a toggle has to guess,
-and this one refuses instead.
+Both installers read your actions from the configuration, bind each hotkey to
+`run-action`, need no elevation, and undo cleanly (`-Uninstall` /
+`--uninstall`).
 
-Both installers read the destination names out of your configuration rather
-than assuming them, need no elevation, and undo cleanly.
-
-```powershell
-# Windows: Start Menu shortcuts with hotkeys (Ctrl+Alt+1 / Ctrl+Alt+2).
-.\scripts\install-windows-shortcuts.ps1
-.\scripts\install-windows-shortcuts.ps1 -Uninstall
-```
-
-```bash
-# Ubuntu: GNOME custom shortcuts, same bindings.
-./scripts/install-gnome-shortcuts.sh
-./scripts/install-gnome-shortcuts.sh --uninstall
-```
-
-On Windows the hotkey only works while the shortcut lives in the Start Menu or
-on the Desktop, which is why the installer puts it there. On GNOME this uses
-GNOME's own custom-shortcut mechanism rather than a global-hotkey library,
-because under Wayland an application cannot reliably grab keys for itself.
+On Windows a Start Menu shortcut carries the hotkey, which is why the installer
+puts it there. On GNOME it is a custom shortcut, because under Wayland an
+application cannot reliably grab keys for itself.
 
 ---
 
@@ -281,22 +196,23 @@ because under Wayland an application cannot reliably grab keys for itself.
 
 ```
 crates/
-  switcher-core/                 domain logic; no OS calls, no hardware
-  switcher-backend-powertoys/    Windows adapter over the PowerToys CLI
-  switcher-backend-ddcutil/      Linux adapter over ddcutil
-  switcher-cli/                  command surface
+  switcher-core/              domain rules; no OS calls, no hardware
+  switcher-backend-windows/   Windows' DDC/CI API (dxva2), EDID from the registry
+  switcher-backend-ddcutil/   Linux, over ddcutil
+  switcher-desktop/           this computer's desktop: topology, window sweeps
+  switcher-cli/               command surface
+  switcher-gui/               configuration editor that drives the CLI
 docs/
-  hardware-inventory.md          real captured evidence, with confidence labels
-  test-matrix.md                 what is tested, and the hardware procedure
-  troubleshooting.md             failure modes and recovery
-scripts/
-  ubuntu-preflight.sh            read-only Stage A capture for the Z4
-tests/fixtures/                  verbatim tool output the parsers are tested against
-examples/config.example.toml     schema, with placeholders that are not valid codes
+  hardware-inventory.md       captured evidence from the machines it was built on
+  test-matrix.md              what is tested, and the hardware procedure
+  troubleshooting.md          failure modes and recovery
+scripts/                      installers and hotkey binders
+tests/fixtures/               verbatim tool output, for parsers and as evidence
+examples/config.example.toml  the configuration schema
 ```
 
-Backends sit behind one narrow trait (`MonitorBackend`), so the rules that
-decide whether a write is safe are tested without hardware.
+Backends sit behind one narrow trait (`MonitorBackend`), so the rules that decide
+whether a write is safe are tested without hardware.
 
 ---
 
@@ -308,14 +224,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-All three pass. Hardware switching is not safe to run unattended and is not in
-CI.
+All three pass on Windows and Linux. Switching real monitors is not safe to run
+unattended and is not in CI; [docs/test-matrix.md](docs/test-matrix.md) has the
+procedure for doing it by hand.
 
 ---
 
 ## Uninstall
 
-Delete the binary, and remove the per-user configuration and state directories
-(`desktop-switcher doctor` prints both paths). Nothing is installed system-wide,
-no service is registered, and no elevation is ever required. PowerToys and
-`ddcutil` are separate installs and are left alone.
+Delete the binaries, and the per-user configuration and state directories
+(`desktop-switcher doctor` prints both). Nothing is installed system-wide, no
+service is registered, and no elevation is ever needed.

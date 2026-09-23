@@ -285,3 +285,55 @@ it is not something either computer can settle on its own.
 4. **Behaviour when Power Display is not running** is untested. The adapter
    classifies such a failure and reports it, but the exact message PowerToys
    emits has not been observed.
+
+---
+
+## Recabled, both panels on both hosts — captured 2026-09-23
+
+Supersedes the unknowns above where they overlap: the left/right question is
+settled by label (`ASFPA9A001109` is the left panel), writes have been performed
+and watched many times, and PowerToys is no longer involved.
+
+**Cabling.** Both panels are now cabled to both computers, identically, and
+every mapping was confirmed by watching the switch happen:
+
+| Panel | Laptop | Workstation (Z4) |
+|---|---|---|
+| `ASFPA9A001108` (center) | HDMI-1, `0x11` | DisplayPort-1, `0x0F` |
+| `ASFPA9A001109` (left) | HDMI-1, `0x11`, through an HDMI↔DP cable | DisplayPort-1, `0x0F` |
+
+On the Z4 the panels are `card1-DP-1` (center) and `card1-DP-4` (left). On the
+laptop both sit on the adapter instance `4&34b9e9a7&0`, the same one as the
+built-in panel, and the driver reports **DisplayPort** for both — including the
+one plugged into the monitor's HDMI socket. The driver describes its own end of
+the cable.
+
+**The left panel's register lied for a week.** At the start of the session it
+read `0x0F` while physically on HDMI showing the laptop; `0x0F` had simply been
+the last value written to it.
+
+**The converter cable carries short DDC/CI exchanges but not the capabilities
+string.** Through Windows' API directly, the left panel answers VCP `0x60` reads
+and writes; `GetCapabilitiesStringLength` succeeds with length 0, every time.
+PowerToys hid the panel entirely for that reason — the trigger for replacing it
+with the built-in Windows backend. The center panel returns its full 302-byte
+string.
+
+**Awake panels answered both computers.** The Z4 read both panels while both
+showed the laptop, and the laptop read and wrote the center panel while it
+showed the Z4. Silence meant asleep, not "busy with the other computer".
+
+**A panel on an input with no picture sleeps, and then ignores everything.**
+With the Z4's GNOME session idled out (5-minute idle delay, locked, both outputs
+at `dpms=Off`, Mutter `PowerSaveMode` 3), panels switched to it went dark.
+Reads from the laptop returned `0xC0262589`; the Z4's ddcutil reported
+`Invalid display`; a `SetVCPFeature` from the laptop succeeded at the API and
+changed nothing, the register afterwards still holding `0x0F`. Setting Mutter's
+`PowerSaveMode` to 0 over SSH woke the Z4's outputs, and the panel woke with
+them and answered both computers again.
+
+**Windows re-detects a panel when it changes input.** For a second or two after
+a panel arrives on the laptop's input, `QueryDisplayConfig` can omit it or show
+the pair as sharing one source (mirrored). One action's second step hit that
+window and refused; the backend now waits for the topology to settle before a
+write.

@@ -1,102 +1,94 @@
 # desktop-switcher configuration — SCHEMA EXAMPLE
 #
-# Do NOT copy this file into place and fill in plausible-looking values.
-# Every `REPLACE_...` below must come from real discovery and, for input codes,
-# from a switch a human actually watched happen. Run:
+# Do not copy this into place and fill in plausible-looking values. Run
 #
 #     desktop-switcher configure
 #
-# which writes this file for you, and then, for each monitor and the other
-# computer:
+# which discovers your monitors and writes the real file. Every `REPLACE_...`
+# below has to come from that discovery.
 #
-#     desktop-switcher test-input --monitor left --code 0xNN --destination ubuntu
-#
-# Configuration is per-host. The Windows laptop and the Ubuntu workstation each
-# keep their own file; connection ids and input codes do not transfer between
-# them.
+# Each computer keeps its own file: connection ids differ between machines,
+# and so can input codes, because a code names the monitor's socket, not the
+# computer plugged into it.
 
-schema_version = 1
+schema_version = 2
 
 # A name for this computer. Free-form; only used in output and logs.
 host = "REPLACE_WITH_HOST_NAME"
 
-# "powertoys-cli" on Windows, "ddcutil-cli" on Linux, "fake" for a dry
-# demonstration that touches no hardware.
-backend = "powertoys-cli"
+# "windows" (Windows' own DDC/CI API) or "ddcutil-cli" (Linux). "fake" gives
+# in-memory monitors that touch no hardware. The old "powertoys-cli" is still
+# accepted and means "windows".
+backend = "windows"
 
-# Which destination name means *this* computer. Used to tell an expected loss
-# of DDC contact (we just switched a monitor to the other machine) apart from a
-# real fault.
-self_destination = "windows"
+# Linux only: pin the ddcutil executable instead of searching PATH.
+# tool_path = "/usr/bin/ddcutil"
 
-# Optional: pin the backend executable instead of searching for it. Recommended
-# for keyboard shortcuts, which run with a different environment than a shell.
-# tool_path = "C:\\Users\\you\\AppData\\Local\\PowerToys\\WinUI3Apps\\PowerToys.PowerDisplay.Cli.exe"
-
-# Seconds before a backend command is killed.
+# Seconds before a backend command is killed (ddcutil).
 timeout_seconds = 15
 
-# Milliseconds to wait after a write before attempting to read it back. Too
-# short and the monitor has not settled; too long and the shortcut feels slow.
+# Milliseconds to wait after a write before reading it back.
 settle_ms = 1200
 
-# Repeat requests for the same destination inside this window are ignored, so a
-# held-down shortcut key does not issue a burst of writes.
+# Repeats of the same request inside this window are ignored, so a held-down
+# hotkey does not issue a burst of writes.
 dedupe_ms = 1500
 
-# Optional: the order writes are issued in. Omit for declaration order. Set it
-# if testing shows one monitor must move before the other.
-# switch_order = ["left", "right"]
-
 
 [[monitors]]
-# The name you use on the command line.
-logical_id = "left"
-name = "AOC 27P2DG5 — left"
+# The name used on the command line. `configure` uses the EDID serial.
+key = "REPLACE_AFTER_DISCOVERY"
+# A friendlier name; the command line accepts either.
+label = "left"
 
-# The backend's stable handle, recorded at configure time. On Windows this is
-# the PowerToys monitor id; on Linux, the DRM connector. It identifies the
-# *port*, so it changes if you move the cable.
+# The backend's handle for the connection, recorded by `configure`. On Windows
+# a device path, on Linux a DRM connector such as "card1-DP-4". It names the
+# *cable*, so it changes if you move one, and the tool then refuses until you
+# re-run `configure`.
 backend_id = "REPLACE_AFTER_DISCOVERY"
 
-# The EDID serial. This identifies the *panel*, and is what a binding is
-# actually checked against. If a panel publishes no serial, leave this out and
-# the tool will say so, loudly, every time.
+# The EDID serial names the *monitor*, and is what a binding is checked
+# against. A monitor with no serial is bound by connection alone, with a
+# warning every time.
 serial = "REPLACE_AFTER_DISCOVERY"
 model = "REPLACE_AFTER_DISCOVERY"
 
-[monitors.destinations.windows]
-# The input code THIS monitor must be set to in order to show the Windows
-# machine. Always written with an explicit 0x prefix: a bare `11` is rejected,
-# because decimal 11 is 0x0B and switching to the wrong input is expensive.
-input_code = "REPLACE_AFTER_VERIFIED_TEST"
-# One of: unknown, reported, read-confirmed, write-confirmed, user-confirmed.
-# `switch` refuses anything below user-confirmed.
-verification = "user-confirmed"
-verified_on = "REPLACE_WITH_DATE"
+[[monitors.inputs]]
+# The monitor's own VCP 0x60 value, always with an explicit 0x: a bare `11`
+# is rejected, because decimal 11 is 0x0B and the wrong input is expensive.
+input_code = "0x11"
+# Whatever this input means to you.
+label = "Laptop"
+# unknown, reported, read-confirmed, write-confirmed or user-confirmed.
+# `configure` records what the monitor claims as `reported`. Only a person who
+# watched the switch happen should write `user-confirmed`; anything less makes
+# every switch to it print a warning.
+verification = "reported"
 
-[monitors.destinations.ubuntu]
-input_code = "REPLACE_AFTER_VERIFIED_TEST"
-verification = "user-confirmed"
-verified_on = "REPLACE_WITH_DATE"
+[[monitors.inputs]]
+input_code = "0x0F"
+label = "Workstation"
+verification = "reported"
 
 
-[[monitors]]
-logical_id = "right"
-name = "AOC 27P2DG5 — right"
-backend_id = "REPLACE_AFTER_DISCOVERY"
-serial = "REPLACE_AFTER_DISCOVERY"
-model = "REPLACE_AFTER_DISCOVERY"
+# An action is a named list of steps, run in order, stopping at the first that
+# fails. A hotkey is optional; the installers bind the ones you set.
+[[actions]]
+name = "Workstation"
+hotkey = "CTRL+ALT+2"
 
-# Note that these codes are NOT expected to match the left monitor's. On the
-# hardware this project was built against, the two panels use different inputs
-# for the same computer.
-[monitors.destinations.windows]
-input_code = "REPLACE_AFTER_VERIFIED_TEST"
-verification = "user-confirmed"
-verified_on = "REPLACE_WITH_DATE"
+# Set one monitor to one input. Repeat for each monitor: every monitor is its
+# own mapping, and nothing assumes two monitors use the same codes.
+[[actions.steps]]
+kind = "set-input"
+monitor = "left"
+code = "0x0F"
 
-[monitors.destinations.ubuntu]
-input_code = "REPLACE_AFTER_VERIFIED_TEST"
-verification = "user-confirmed"
-verified_on = "REPLACE_WITH_DATE"
+# Run any program. Arguments are a list and never pass through a shell.
+# [[actions.steps]]
+# kind = "run"
+# command = "ssh"
+# args = ["workstation", "wake-screens"]
+
+# Also available: "sweep" and "restore-windows" (move this computer's windows
+# off a monitor and back), each with an optional `monitor`.

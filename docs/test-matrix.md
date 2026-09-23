@@ -4,111 +4,118 @@ Three tiers. The first two run unattended; the third must not.
 
 ## Tier 1 — automated, no hardware
 
-`cargo test --workspace`. 127 tests at the time of writing.
+`cargo test --workspace`: 174 tests at the time of writing, passing on Windows
+and on Linux (where five Windows-only tests are compiled out).
 
 They cover, among other things:
 
 | Property | Where |
 |---|---|
 | A bare decimal input code is rejected as ambiguous | `switcher-core::types` |
+| Only a person watching can make an input trusted; the word "confirmed" is never used for a read-back | `switcher-core::types` |
 | `0x60` is read from the `vcp(...)` section only, never from elsewhere in a capability string | `switcher-core::mccs` |
 | Malformed, truncated and oversized capability strings fail loudly rather than parsing to an empty list | `switcher-core::mccs` |
-| A panel with no usable EDID serial yields `None`, not a fabricated identifier | `switcher-core::edid` |
+| A monitor with no usable EDID serial yields `None`, not a fabricated identifier | `switcher-core::edid` |
 | A hung backend process is killed and reported as a timeout | `switcher-core::proc` |
 | Arguments are passed as an array, so a serial containing a `;` cannot become a second command | `switcher-core::proc` |
-| Reordered discovery does not change which monitor a logical id binds to | `switcher-core::inventory` |
+| Reordered discovery does not change which monitor a configured entry binds to | `switcher-core::inventory` |
 | Duplicate serials, missing monitors and moved cables all block the switch instead of resolving to a guess | `switcher-core::inventory` |
-| A missing panel can be restated as present-but-silent, and nothing else can | `switcher-core::inventory` |
 | The internal laptop panel is never a switch target | `switcher-core::inventory` |
 | Each monitor is written its own code; nothing is batched | `switcher-core::switch` |
-| A read that already matches never suppresses the write | `switcher-core::switch` |
-| A stale read cannot block a recovery | `switcher-core::switch` |
-| Losing DDC contact after switching away is not reported as a failure | `switcher-core::switch` |
+| A read that already matches never suppresses the write, and a stale read cannot block a recovery | `switcher-core::switch` |
 | A write that is accepted but ignored is not reported as success | `switcher-core::switch` |
 | One monitor failing yields a partial report, with no rollback attempted | `switcher-core::switch` |
-| `toggle` refuses on mixed inputs, unreadable monitors, or a manual OSD change to an unmapped input | `switcher-core::switch` |
-| A stale lock file does not wedge the tool | `switcher-core::switch` |
-| The last-request record survives a round trip to disk | `switcher-core::switch` |
-| `doctor`, `monitors` and `inspect` never create or write anything | `switcher-cli` integration tests |
-| Interactive commands refuse to run when stdin is not a terminal | `switcher-cli` integration tests |
+| A stale lock file does not wedge the tool; the last-request record survives a round trip to disk | `switcher-core::switch` |
+| A configuration naming the PowerToys backend loads as the Windows backend and saves under the new name | `switcher-core::config` |
+| A display is listed without anything being asked of it, and without an EDID | `switcher-backend-windows::topology` |
+| Ids match exactly: `...UID4165` never addresses `...UID41650` | `switcher-backend-windows::topology` |
+| Mirrored displays and duplicate ids are refused; the built-in panel and detached displays are never addressed | `switcher-backend-windows::topology` |
+| A reshuffle is waited out; a desktop that stays mirrored, or a structural refusal, is still refused | `switcher-backend-windows::topology` |
+| A zero reply is a failed read, not an input; real AOC capabilities yield their advertised inputs | `switcher-backend-windows::topology` |
+| A read-back is never recorded as evidence, and the unverified-input warning survives use | `switcher-cli` integration tests |
+| The interface never names a computer | `switcher-cli` integration tests |
+| Read-only commands never create or write a configuration | `switcher-cli` integration tests |
 
 ## Tier 2 — parser fixtures
 
 Real captured output, byte for byte, in `tests/fixtures/`.
 
-- `powertoys/` — **real**, captured from PowerToys 0.101.2362.0 on 2026-09-16,
-  with stdout, stderr and exit status recorded separately.
-- `ddcutil/` — **synthetic**, pending capture from the HP Z4. See the README in
-  that directory for how to replace them.
-
-A test also cross-checks the two independent readings of the same capability
-claim — the CLI's parsed table and the raw MCCS string — against each other.
+- `ddcutil/` — the Linux backend's parser is tested against these. See the
+  README in that directory for how to capture new ones.
+- `powertoys/` — captured from PowerToys 0.101.2362.0 on 2026-09-16. No code
+  reads these any more; they are kept as the evidence behind
+  [hardware-inventory.md](hardware-inventory.md).
 
 ## Tier 3 — hardware, human present
 
 **Never run these unattended, and never in CI.** Each one can leave a screen
-blank until someone presses buttons on the monitor.
+dark until someone presses buttons on the monitor or wakes a computer.
 
-Before starting, confirm recovery works: the laptop's built-in panel is
-available, and you can reach each monitor's on-screen menu by hand.
+Before starting, confirm recovery works: a laptop's built-in panel is
+available, you can reach each monitor's on-screen menu by hand, and the
+computer on each input you will switch to has its screen **on** — a monitor
+sent to a blanked computer goes to sleep.
+
+### Current cabling, 2026-09-23
+
+Both AOC 27P2DG5 panels are cabled to both computers, identically: the laptop
+on HDMI-1 (`0x11`), the workstation on DisplayPort-1 (`0x0F`).
 
 | # | Case | Pass condition | Status |
 |---|---|---|---|
-| 1 | Read-only discovery on Windows | Both AOCs identified by distinct serial, internal panel excluded | **passed 2026-09-16** |
-| 2 | Read-only discovery on Ubuntu | The cabled AOC identified, invalid displays flagged | **passed 2026-09-16** |
-| 3 | Serials agree across the two hosts | The same serial identifies the same panel on both | **passed 2026-09-16** — `ASFPA9A001108` from both, and byte-identical capability strings |
-| 4 | Capabilities on both hosts | Feature `0x60` and its values shown, labelled as claims | **passed 2026-09-16** on both |
-| 4b | DDC reachable from the non-displaying computer | The idle computer can still read `0x60` | **passed 2026-09-16** — the Z4 reads `0x11` while Windows drives the panel |
-| 5 | Single monitor, → Ubuntu | The nominated panel shows Ubuntu; recovery works | **passed 2026-09-16** — `test-input --code 0x0F` issued from the Z4, panel switched, recovered with the monitor buttons |
-| 6 | Single monitor, → Windows | Mirror of case 5, issued by the tool | **passed 2026-09-16** — `switch windows` from the Z4, confirmed by read |
-| 6c | Full round trip via `switch` | Both directions issued by the tool and verified | **passed 2026-09-16** — `switch ubuntu` then `switch windows`, both `confirmed by read` |
-| 6b | Readback tracks a manual OSD change | A change made with the monitor buttons is visible to the tool | **passed 2026-09-16** — five consecutive reads returned `0x11` after a manual switch back |
-| 7 | Both monitors, each direction | Both switch; per-monitor result and timing recorded | not run |
-| 8 | Mixed initial inputs | An explicit target converges both panels on the requested computer | not run |
-| 9 | Repeated same request | The same absolute code is written again; no cycling, no new input | **passed 2026-09-16** on hardware as a no-write skip; the skip was **removed 2026-09-17** after a panel physically on HDMI reported DisplayPort and the skip blocked the way back. Needs a re-run: expect two writes of the same code and no visible change. |
+| 16 | Recabled codes re-verified by eye | Each monitor, each code, switch watched | **passed 2026-09-23** — all four; the left panel's laptop code proved to be `0x11`, not the `0x0F` its register had reported for a week |
+| 17 | Windows backend discovers a panel PowerToys hid | Listed, bound, read | **passed 2026-09-23** — left panel's capabilities fail over its converter cable every time; short reads and writes work |
+| 7 | Both monitors, each direction, from each computer | Both switch; per-monitor result reported | **passed 2026-09-23** — from the Z4 (ddcutil) and from the laptop (Windows backend), both directions, watched |
+| 9 | Repeated same request | The same code is written again; no cycling, no visible change | **passed 2026-09-23** — left panel already on `0x11`, `set 0x11` wrote and nothing changed on screen |
+| 4b | DDC reachable from the non-displaying computer | The other computer can read and write the monitor | **passed 2026-09-23** — an *awake* panel answered both computers whatever input it showed; the laptop pulled the center panel back from the Z4 on its own |
+| 15 | Switching to a computer whose screens are off | Reported honestly; recovery documented | **passed 2026-09-23** — panels went dark and ignored reads *and* writes from both computers; waking the Z4's screens woke them. See troubleshooting, "The screen went dark". |
+| 18 | Windows re-detection between the steps of an action | The second step waits and succeeds | **passed 2026-09-23** after a fix — the first run refused on a transiently "mirrored" desktop |
+| 8 | Mixed initial inputs | An action converges both monitors on the requested inputs | not run |
 | 10 | Monitor order changes (sleep, dock re-enumeration) | No write lands on the wrong display | not run |
-| 11 | Sleep / wake / dock reconnect | Re-enumeration is safe, or fails clearly | not run |
-| 12 | PowerToys closed, or `/dev/i2c` denied | Actionable error; no root requirement, no fallback to monitor 1 | not run |
-| 13 | Input read lost after switching away | Reported as `issued, visual state unconfirmed`, never as verified | covered by tier 1, not yet on hardware |
-| 14 | Manual OSD change, then `toggle` | Refuses and explains, rather than guessing | covered by tier 1, not yet on hardware |
-| 15 | One computer powered off | Switching to it is still allowed but reported honestly; recovery documented | not run |
+| 11 | Laptop sleep / wake / dock reconnect | Re-enumeration is safe, or fails clearly | not run |
+| 12 | `/dev/i2c` denied on Linux | Actionable error; no root requirement | not run |
 
-### Procedure for cases 5 and 6
+### Earlier cabling, 2026-09-16
 
-This is how an input code earns `user-confirmed`, and it is the only way.
+Only one panel (`ASFPA9A001108`) was cabled to both computers, and the tool was
+organised around destination computers and the PowerToys backend.
 
-1. Pick **one** monitor and **one** candidate code. Start with a code the
-   monitor advertises, and one where you have reason to think a live computer is
-   attached to that port.
-2. Make sure you can recover: the other computer is reachable, or you are
-   willing to use the monitor's buttons.
-3. Run, from the computer that currently owns the monitor:
+| # | Case | Status |
+|---|---|---|
+| 1 | Read-only discovery on Windows | passed — both panels by distinct serial, internal panel excluded |
+| 2 | Read-only discovery on Ubuntu | passed — cabled panel identified, invalid displays flagged |
+| 3 | Serials agree across the two hosts | passed — `ASFPA9A001108` from both, byte-identical capability strings |
+| 4 | Capabilities on both hosts | passed — feature `0x60` shown and labelled as claims |
+| 5, 6, 6c | Single monitor, each direction, and a full round trip | passed — issued from the Z4 and watched |
+| 6b | A manual OSD change is visible to the tool | passed |
 
-   ```
-   desktop-switcher test-input --monitor left --code 0x0F --destination ubuntu
-   ```
+## Procedure: confirming an input
 
-4. The tool prints what it is about to do, the recovery instructions, and waits
-   for an explicit confirmation. It writes once. It does not retry.
-5. **Look at the monitor.** The tool then asks what you actually saw. Only the
-   answer "the other computer" records the mapping.
-6. Restore the monitor, either from the other computer or with the monitor's own
-   buttons.
-7. Repeat for the other monitor, then for the other direction.
+This is how an input code earns `user-confirmed`.
 
-A read-back that fails at step 4 is expected when the switch worked: the monitor
-has stopped talking to the computer that just sent it away. The tool says so
-rather than calling it a failure — and equally, it does not call it a success.
+1. Pick **one** monitor and **one** code. Prefer one where you know a computer
+   with its screen **on** is plugged into that socket.
+2. Make sure you can recover: the monitor's buttons, or another computer that
+   can reach it.
+3. Put this procedure somewhere that is not on the monitor you are testing.
+4. `desktop-switcher set <monitor> 0xNN`, and **look at the monitor**. The
+   tool's own output cannot tell you whether it switched; a read-back only
+   repeats what the monitor stored.
+5. If it showed what you expected, mark that input `verification =
+   "user-confirmed"` in `config.toml`. There is not yet a command for this.
+6. Switch it back, and repeat for the next code.
 
-### What must be recorded for each hardware run
+The most reliable proof is a switch you watched *arrive*: send the monitor to a
+different input first, then to the code under test. A monitor already on the
+input you ask for gives you nothing to watch.
 
-- The exact command, its exit code, and its full output.
+### What to record for each hardware run
+
+- The exact command, its exit code and full output.
 - What the screens physically did.
-- Whether the previously-owning computer could still reach the monitor
-  afterwards.
+- Whether each computer could still reach the monitor afterwards.
 - Whether switching one monitor affected the other's enumeration.
 - Any recovery step needed.
 
-The tool writes its own event log to the per-user data directory
-(`desktop-switcher doctor` prints the path); that log records commands and
-outcomes but cannot record what you saw.
+The event log (`desktop-switcher doctor` prints its path) records commands and
+outcomes, but cannot record what you saw.
