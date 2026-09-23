@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/switcher-core",
-    "crates/switcher-backend-powertoys",
+    "crates/switcher-backend-windows",
     "crates/switcher-backend-ddcutil",
     "crates/switcher-desktop",
     "crates/switcher-cli",
@@ -18,7 +18,7 @@ repository = "https://github.com/berkant/desktop-switcher"
 
 [workspace.dependencies]
 switcher-core = { path = "crates/switcher-core" }
-switcher-backend-powertoys = { path = "crates/switcher-backend-powertoys" }
+switcher-backend-windows = { path = "crates/switcher-backend-windows" }
 switcher-backend-ddcutil = { path = "crates/switcher-backend-ddcutil" }
 switcher-desktop = { path = "crates/switcher-desktop" }
 

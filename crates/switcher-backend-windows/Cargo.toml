@@ -1,5 +1,5 @@
 [package]
-name = "switcher-backend-powertoys"
+name = "switcher-backend-windows"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,12 @@ license.workspace = true
 
 [dependencies]
 switcher-core.workspace = true
-thiserror.workspace = true
+switcher-desktop.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56.0"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Devices_Display",
+] }

@@ -87,13 +87,13 @@ impl SweptState {
 
 /// Device paths that must never be detached.
 ///
-/// The internal laptop panel is the recovery display. The monitor backend can
-/// recognise it because Windows reaches it over WMI rather than DDC/CI, so
-/// that knowledge is passed down rather than guessed at here.
+/// The internal laptop panel is the recovery display. The desktop layer also
+/// recognises it from the graphics driver on its own; this passes down what
+/// the monitor backend knows as a second, independent source.
 pub fn protected_paths(detected: &[DetectedMonitor]) -> Vec<String> {
     detected
         .iter()
-        .filter(|m| matches!(m.identity.transport, Transport::Wmi))
+        .filter(|m| matches!(m.identity.transport, Transport::Internal))
         .map(|m| m.identity.backend_id.clone())
         .collect()
 }

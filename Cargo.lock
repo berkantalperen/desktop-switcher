@@ -2391,11 +2391,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "switcher-backend-powertoys"
+name = "switcher-backend-windows"
 version = "0.1.0"
 dependencies = [
  "switcher-core",
- "thiserror 2.0.20",
+ "switcher-desktop",
+ "windows 0.62.2",
  "winreg",
 ]
 
@@ -2407,7 +2408,7 @@ dependencies = [
  "clap",
  "serde",
  "switcher-backend-ddcutil",
- "switcher-backend-powertoys",
+ "switcher-backend-windows",
  "switcher-core",
  "switcher-desktop",
  "thiserror 2.0.20",

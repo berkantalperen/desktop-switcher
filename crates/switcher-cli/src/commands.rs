@@ -30,14 +30,14 @@ pub fn doctor(app: &App) -> Result<i32> {
     ui::heading("Backend");
     let health = app.backend.health();
     ui::field("backend", &health.backend);
-    ui::field(
-        "tool path",
-        health.tool_path.as_deref().unwrap_or("(not resolved)"),
-    );
-    ui::field(
-        "tool version",
-        health.tool_version.as_deref().unwrap_or("(unknown)"),
-    );
+    // A backend built on an OS API has no tool to report, and saying
+    // "(not resolved)" would read as a problem.
+    if let Some(path) = health.tool_path.as_deref() {
+        ui::field("tool path", path);
+    }
+    if let Some(version) = health.tool_version.as_deref() {
+        ui::field("tool version", version);
+    }
 
     println!();
     let mut blockers = 0;
@@ -90,20 +90,31 @@ pub fn doctor(app: &App) -> Result<i32> {
                             binding.detected.identity.describe()
                         );
                     }
-                    // A monitor backend only sees panels that answer DDC, so
-                    // "unplugged" and "here but not answering" arrive
+                    // A backend may not list a monitor it cannot talk to, so
+                    // "unplugged" and "here but unreachable" can arrive
                     // identically. The desktop layer can tell them apart, and
                     // the difference decides what the person should do next.
                     let at_os_level = desktop::manager(&detected).displays().unwrap_or_default();
                     for problem in &bindings.problems {
-                        let present = problem.is_not_found()
-                            && config.monitor(problem.monitor()).is_some_and(|m| {
-                                at_os_level
-                                    .iter()
-                                    .any(|d| d.matches_backend_id(&m.backend_id))
-                            });
-                        let refined = present.then(|| problem.as_present_but_silent()).flatten();
-                        let text = refined.as_ref().unwrap_or(problem).to_string();
+                        let place = if problem.is_not_found() {
+                            config
+                                .monitor(problem.monitor())
+                                .map(|m| whereabouts(&at_os_level, &m.backend_id))
+                                .unwrap_or(Whereabouts::Absent)
+                        } else {
+                            Whereabouts::Absent
+                        };
+                        let text = match place {
+                            Whereabouts::Attached => problem
+                                .as_present_but_silent()
+                                .unwrap_or_else(|| problem.clone())
+                                .to_string(),
+                            Whereabouts::Detached => format!(
+                                "{problem} It is plugged in but turned off in this computer's \
+                                 display settings; turn it on in Settings > System > Display."
+                            ),
+                            Whereabouts::Absent => problem.to_string(),
+                        };
                         let mut lines = textwrap(&text, 66).into_iter();
                         println!("  [BLOCKER] {}", lines.next().unwrap_or_default());
                         for line in lines {
@@ -218,17 +229,17 @@ pub fn monitors(app: &App) -> Result<i32> {
     // makes a monitor look like it stopped existing when it has only stopped
     // talking. Each one says which of the two it is.
     let silent = unanswered(app, &switchable, &detected);
-    for (cfg, present) in &silent {
+    for (cfg, place) in &silent {
         println!();
         println!("{}", cfg.label);
         ui::field("name it by", &cfg.key);
         ui::field("connection", &cfg.backend_id);
         ui::field(
             "current input",
-            if *present {
-                "not answering"
-            } else {
-                "not present"
+            match place {
+                Whereabouts::Attached => "not answering",
+                Whereabouts::Detached => "turned off in display settings",
+                Whereabouts::Absent => "not present",
             },
         );
 
@@ -243,10 +254,22 @@ pub fn monitors(app: &App) -> Result<i32> {
             }
         }
 
-        let why = if *present {
-            "This computer is drawing on it, so the cable is fine. The panel is              showing one of its other inputs and is not listening here — and if that              input has nothing plugged into it, the panel is asleep and nothing can              reach it at all. Use the monitor's own buttons."
-        } else {
-            "Nothing on this computer matches it right now, so no command here can              reach it."
+        let why = match place {
+            Whereabouts::Attached => {
+                "This computer is drawing on it, so the cable is fine, but it did not \
+                 answer. A monitor asleep on an input with no picture ignores every \
+                 command. Wake the computer on that input, or use the monitor's own \
+                 buttons."
+            }
+            Whereabouts::Detached => {
+                "It is plugged in, but turned off in this computer's display settings, \
+                 so there is no way to talk to it. Turn it on in Settings > System > \
+                 Display."
+            }
+            Whereabouts::Absent => {
+                "Nothing on this computer matches it right now, so no command here can \
+                 reach it."
+            }
         };
         let mut first = true;
         for line in textwrap(why, 56) {
@@ -270,13 +293,37 @@ pub fn monitors(app: &App) -> Result<i32> {
     Ok(0)
 }
 
-/// Configured monitors no DDC path reached, each paired with whether this
-/// computer can nonetheless see the display.
+/// Where a configured monitor the backend did not list actually is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Whereabouts {
+    /// Part of this desktop, yet the backend did not list it.
+    Attached,
+    /// Plugged in, but turned off in this computer's display settings.
+    Detached,
+    /// Nothing on this computer matches it.
+    Absent,
+}
+
+fn whereabouts(at_os_level: &[switcher_desktop::DesktopDisplay], backend_id: &str) -> Whereabouts {
+    let matching: Vec<_> = at_os_level
+        .iter()
+        .filter(|d| d.matches_backend_id(backend_id))
+        .collect();
+    if matching.iter().any(|d| d.is_attached) {
+        Whereabouts::Attached
+    } else if matching.is_empty() {
+        Whereabouts::Absent
+    } else {
+        Whereabouts::Detached
+    }
+}
+
+/// Configured monitors the backend did not list, each with where it really is.
 fn unanswered<'a>(
     app: &'a App,
     switchable: &[&DetectedMonitor],
     detected: &[DetectedMonitor],
-) -> Vec<(&'a MonitorConfig, bool)> {
+) -> Vec<(&'a MonitorConfig, Whereabouts)> {
     let Some(config) = app.config.as_ref() else {
         return Vec::new();
     };
@@ -295,12 +342,7 @@ fn unanswered<'a>(
     let at_os_level = desktop::manager(detected).displays().unwrap_or_default();
     missing
         .into_iter()
-        .map(|cfg| {
-            let present = at_os_level
-                .iter()
-                .any(|d| d.matches_backend_id(&cfg.backend_id));
-            (cfg, present)
-        })
+        .map(|cfg| (cfg, whereabouts(&at_os_level, &cfg.backend_id)))
         .collect()
 }
 
@@ -454,8 +496,7 @@ pub fn set_input(
 /// moved to a live input" looks identical to "stored it and stayed where it
 /// was". One panel was recorded as `write-confirmed` on DVI, a socket it does
 /// not have, which then silenced the warning about unverified inputs. Only a
-/// person watching can raise an input's evidence; that is what `test-input` is
-/// for.
+/// person watching the screen can raise an input's evidence.
 ///
 /// This is best effort: failing to record it must never turn a successful
 /// switch into an error.

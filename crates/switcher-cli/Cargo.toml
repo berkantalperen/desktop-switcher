@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 switcher-core.workspace = true
-switcher-backend-powertoys.workspace = true
+switcher-backend-windows.workspace = true
 switcher-backend-ddcutil.workspace = true
 switcher-desktop.workspace = true
 clap.workspace = true

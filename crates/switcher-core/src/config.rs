@@ -46,8 +46,10 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
-    #[serde(rename = "powertoys-cli")]
-    PowerToysCli,
+    /// Windows' own DDC/CI API. `powertoys-cli` is accepted for configurations
+    /// written before it replaced the PowerToys backend, and means the same.
+    #[serde(rename = "windows", alias = "powertoys-cli")]
+    Windows,
     #[serde(rename = "ddcutil-cli")]
     DdcutilCli,
     /// In-memory backend, for tests and dry runs only.
@@ -590,6 +592,22 @@ mod tests {
 
         let unknown = MonitorInput::reported("0x42".parse().unwrap(), None);
         assert_eq!(unknown.display_name(), "0x42");
+    }
+
+    /// Configurations written while Windows went through PowerToys must keep
+    /// working untouched, and are written back under the new name.
+    #[test]
+    fn a_powertoys_configuration_loads_as_the_windows_backend() {
+        let text = r#"
+schema_version = 2
+host = "laptop"
+backend = "powertoys-cli"
+"#;
+        let config = Config::from_toml(text).unwrap();
+        assert_eq!(config.backend, BackendKind::Windows);
+        let saved = toml::to_string(&config).unwrap();
+        assert!(saved.contains("backend = \"windows\""), "{saved}");
+        assert!(!saved.contains("powertoys"), "{saved}");
     }
 
     /// The old schema was organised around destination computers. Upgrading

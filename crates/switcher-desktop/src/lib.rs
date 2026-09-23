@@ -83,7 +83,7 @@ impl Rect {
 /// because they hang off one DP MST chain, yet one of them shows this
 /// computer on HDMI-1 (`0x11`) — the dock converts after the hub. The driver
 /// describes its own end of the cable, not the socket at the monitor.
-/// Finding the code is what `test-input` and a pair of eyes are for.
+/// Finding the code is what a pair of eyes is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connector {
     Vga,
@@ -128,8 +128,8 @@ pub struct DesktopDisplay {
     /// GDI adapter name, e.g. `\\.\DISPLAY5`. Addresses the display to the OS.
     pub gdi_name: String,
     /// Device interface path, e.g. `\\?\DISPLAY#AOC2702#5&23e...&0&UID4613`.
-    /// Shares a prefix with the id the PowerToys backend reports, which is how
-    /// a monitor is matched between the two layers.
+    /// Shares a prefix with the id the Windows monitor backend reports, which
+    /// is how a monitor is matched between the two layers.
     pub device_path: String,
     pub friendly_name: Option<String>,
     pub rect: Rect,

@@ -1,6 +1,6 @@
 //! Reads a display's EDID out of the Windows device registry.
 //!
-//! PowerToys reports a DevicePath-derived id such as
+//! Windows names a display by a DevicePath such as
 //! `\\?\DISPLAY#AOC2702#5&23e00778&0&UID4613`. The same components address the
 //! device's registry key, where Windows caches the EDID block the monitor sent
 //! during handshake. Reading it needs no elevation.

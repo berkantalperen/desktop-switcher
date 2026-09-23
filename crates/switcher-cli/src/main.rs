@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use switcher_backend_ddcutil::DdcutilBackend;
-use switcher_backend_powertoys::PowerDisplayBackend;
+use switcher_backend_windows::WindowsBackend;
 use switcher_core::backend::MonitorBackend;
 use switcher_core::config::{self, BackendKind, Config};
 use switcher_core::eventlog::EventLog;
@@ -62,8 +62,8 @@ struct Cli {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum BackendChoice {
-    /// PowerToys Power Display CLI (Windows).
-    Powertoys,
+    /// Windows' own DDC/CI API. Nothing to install.
+    Windows,
     /// ddcutil (Linux).
     Ddcutil,
     /// In-memory monitors. Touches no hardware; for trying the commands out.
@@ -73,7 +73,7 @@ enum BackendChoice {
 impl From<BackendChoice> for BackendKind {
     fn from(c: BackendChoice) -> Self {
         match c {
-            BackendChoice::Powertoys => BackendKind::PowerToysCli,
+            BackendChoice::Windows => BackendKind::Windows,
             BackendChoice::Ddcutil => BackendKind::DdcutilCli,
             BackendChoice::Fake => BackendKind::Fake,
         }
@@ -153,7 +153,7 @@ pub struct App {
 
 fn default_backend_kind() -> BackendKind {
     if cfg!(windows) {
-        BackendKind::PowerToysCli
+        BackendKind::Windows
     } else {
         BackendKind::DdcutilCli
     }
@@ -165,10 +165,7 @@ fn build_backend(
     timeout: Duration,
 ) -> Result<Box<dyn MonitorBackend>> {
     Ok(match kind {
-        BackendKind::PowerToysCli => {
-            let exe = PowerDisplayBackend::locate(tool_path)?;
-            Box::new(PowerDisplayBackend::new(exe, timeout))
-        }
+        BackendKind::Windows => Box::new(WindowsBackend::new()),
         BackendKind::DdcutilCli => {
             let exe = DdcutilBackend::locate(tool_path)?;
             Box::new(DdcutilBackend::new(exe, timeout))

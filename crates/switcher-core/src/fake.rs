@@ -70,7 +70,7 @@ impl FakeMonitor {
         let mut m = Self::new(backend_id, Some("PANEL"), 0x00);
         m.identity.manufacturer = Some("BOE".into());
         m.identity.model = Some("NE16NZH".into());
-        m.identity.transport = Transport::Wmi;
+        m.identity.transport = Transport::Internal;
         m.current = None;
         m.advertised.clear();
         m

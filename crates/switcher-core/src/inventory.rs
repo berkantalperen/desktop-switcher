@@ -49,7 +49,7 @@ pub enum BindingProblem {
     },
     #[error("`{monitor}` is reachable over {transport}, which cannot carry VCP 0x60")]
     NotSwitchable { monitor: String, transport: String },
-    #[error("`{monitor}` is plugged into this computer but is not answering on the channel that carries input switching. The cable link is up, so this computer keeps drawing on it, but the panel is showing one of its other inputs and is not listening here. If that input has nothing plugged into it the panel has gone to sleep and nothing can reach it at all. Change it back with the monitor's own buttons.")]
+    #[error("`{monitor}` is part of this desktop but is not answering on the channel that carries input switching. A monitor does this while asleep on an input with no picture — nothing plugged in there, or that computer's screen is off — and it ignores every command until a picture arrives. Wake the computer on that input, or use the monitor's own buttons.")]
     PresentButSilent { monitor: String },
 }
 
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn internal_panel_is_never_bound_as_a_switch_target() {
         let config = config_with(vec![cfg_monitor("panel", "internal", Some("SN-P"))]);
-        let present = vec![detected("internal", Some("SN-P"), Transport::Wmi)];
+        let present = vec![detected("internal", Some("SN-P"), Transport::Internal)];
         let set = bind(&config, &present);
         assert!(set.bound.is_empty());
         assert!(matches!(

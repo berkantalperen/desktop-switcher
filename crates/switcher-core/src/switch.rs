@@ -140,7 +140,10 @@ impl fmt::Display for ApplyStatus {
                 "every monitor stored the request; look at the screens to see if they moved"
             }
             ApplyStatus::AllIssuedSomeUnconfirmed => {
-                "issued; could not be confirmed (expected if the input belongs to another computer)"
+                "issued, but the monitor did not answer afterwards. That is normal for a moment \
+                 while the computer re-detects it; if the screen went dark instead, the input it \
+                 moved to has no picture (that computer's screen is off, or nothing is plugged \
+                 in there), and it will wake when a picture arrives"
             }
             ApplyStatus::Partial => "PARTIAL: some monitors failed",
             ApplyStatus::AllFailed => "FAILED: nothing was switched",

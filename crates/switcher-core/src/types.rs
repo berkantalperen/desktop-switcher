@@ -166,9 +166,9 @@ impl fmt::Display for Evidence {
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {
     DdcCi,
-    /// Windows WMI brightness path, i.e. the internal laptop panel.
-    /// Not an input-switch target, and kept available for recovery.
-    Wmi,
+    /// The built-in laptop panel. Not an input-switch target, and never
+    /// detached: it is the display that is always there to recover with.
+    Internal,
     Other(String),
 }
 
@@ -182,7 +182,7 @@ impl fmt::Display for Transport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Transport::DdcCi => f.write_str("DDC/CI"),
-            Transport::Wmi => f.write_str("WMI"),
+            Transport::Internal => f.write_str("built-in panel"),
             Transport::Other(s) => f.write_str(s),
         }
     }
@@ -191,7 +191,7 @@ impl fmt::Display for Transport {
 /// What a host knows about one physical display right now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorIdentity {
-    /// Backend-stable handle: a PowerToys DevicePath id, or a ddcutil selector.
+    /// Backend-stable handle: a Windows device path, or a ddcutil selector.
     pub backend_id: String,
     /// Discovery-time ordinal. An addressing convenience, NOT identity.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -320,7 +320,7 @@ impl fmt::Display for InputReading {
             InputReading::Unsupported => f.write_str("feature 0x60 not supported"),
             InputReading::ReadFailed { detail } => write!(f, "read failed: {detail}"),
             InputReading::UnavailableAfterSwitch { detail } => {
-                write!(f, "unreadable after switch (expected): {detail}")
+                write!(f, "not answering right after the switch: {detail}")
             }
         }
     }
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn internal_panel_is_not_switchable() {
-        assert!(!Transport::Wmi.supports_input_switching());
+        assert!(!Transport::Internal.supports_input_switching());
         assert!(Transport::DdcCi.supports_input_switching());
     }
 }

@@ -60,8 +60,13 @@ impl WindowsDesktop {
         Self { protected: paths }
     }
 
+    /// The built-in panel is protected on the driver's word alone, whatever the
+    /// monitor backend says. That protection used to depend on one backend
+    /// happening to report the panel a particular way, and would have quietly
+    /// vanished when that backend was replaced.
     fn is_protected(&self, display: &DesktopDisplay) -> bool {
-        self.protected.iter().any(|p| display.matches_backend_id(p))
+        display.connector == Some(Connector::Internal)
+            || self.protected.iter().any(|p| display.matches_backend_id(p))
     }
 }
 
