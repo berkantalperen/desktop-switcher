@@ -38,9 +38,14 @@ const RETRY_DELAY: Duration = Duration::from_millis(400);
 /// How long a write waits for Windows to finish re-detecting its displays
 /// before believing a missing or mirrored display is real: about five seconds.
 /// Reads never wait, so a hotkey is never slowed by a read-back.
+#[cfg_attr(not(windows), allow(dead_code))]
 const SETTLE_ATTEMPTS: usize = 20;
+#[cfg_attr(not(windows), allow(dead_code))]
 const SETTLE_INTERVAL: Duration = Duration::from_millis(250);
 
+// Elsewhere the backend is a stub that refuses every call, so its tuning goes
+// unread; the crate still builds so the workspace does, on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct WindowsBackend {
     attempts: usize,
     retry_delay: Duration,
