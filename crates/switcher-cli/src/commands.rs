@@ -14,9 +14,7 @@ use switcher_core::config::{Config, MonitorConfig, MonitorInput};
 use switcher_core::eventlog;
 use switcher_core::inventory;
 use switcher_core::switch::{self, ApplyReport, ExecOptions, LastRequest, SwitchGuard};
-use switcher_core::types::{
-    DetectedMonitor, Evidence, InputCode, InputReading, MonitorIdentity, WriteOutcome,
-};
+use switcher_core::types::{DetectedMonitor, Evidence, InputCode, InputReading, MonitorIdentity};
 
 use crate::desktop;
 use crate::ui;
@@ -415,7 +413,10 @@ pub fn set_input(
         .and_then(|m| m.input(code))
         .map(|i| i.verification)
         .unwrap_or_default();
-    if confidence < Evidence::WriteConfirmed {
+    // Only a person who watched the screen knows there is a live source on
+    // an input. Nothing the monitor says over DDC can stand in for that, so
+    // nothing short of `user-confirmed` quiets this.
+    if !confidence.is_trusted_for_switching() {
         ui::warn(format!(
             "nothing has confirmed there is a live source on {code} for this monitor \
              (only `{confidence}`). If there is not, the monitor will drop off this \
@@ -442,12 +443,19 @@ pub fn set_input(
     Ok(report.exit_code())
 }
 
-/// Record what a real switch just taught us about an input.
+/// Record the one thing a switch can teach us about an input unattended.
 ///
-/// A monitor that reads back the input we asked for, and is still answering,
-/// demonstrably has a working link on it. A monitor that goes silent has told
-/// us something too — possibly that nothing is attached there — and that is
-/// worth remembering before someone sends it there again by reflex.
+/// A monitor that goes silent right after a write has moved somewhere that is
+/// not this computer — possibly an input with nothing on it — and that is worth
+/// remembering before someone sends it there again by reflex.
+///
+/// A monitor that reads the value back teaches us nothing, and is deliberately
+/// not recorded. The read returns what the monitor stored, and "stored it and
+/// moved to a live input" looks identical to "stored it and stayed where it
+/// was". One panel was recorded as `write-confirmed` on DVI, a socket it does
+/// not have, which then silenced the warning about unverified inputs. Only a
+/// person watching can raise an input's evidence; that is what `test-input` is
+/// for.
 ///
 /// This is best effort: failing to record it must never turn a successful
 /// switch into an error.
@@ -459,20 +467,13 @@ fn learn_from(app: &App, monitor: &str, code: InputCode, step: &switch::StepRepo
         return;
     };
 
-    let confirmed = matches!(step.outcome, WriteOutcome::StoredByMonitor(_));
     let vanished = matches!(
         step.after,
         Some(InputReading::UnavailableAfterSwitch { .. })
     );
 
     let mut updated = existing.clone();
-    if confirmed && updated.verification < Evidence::WriteConfirmed {
-        updated.verification = Evidence::WriteConfirmed;
-        updated.note = Some(format!(
-            "Confirmed by reading it back on {}.",
-            eventlog::today()
-        ));
-    } else if vanished {
+    if vanished {
         updated.note = Some(format!(
             "On {}, the monitor stopped answering after this was selected. That is \
              normal if another computer is on it, and is what it looks like when \

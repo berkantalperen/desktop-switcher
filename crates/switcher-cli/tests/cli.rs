@@ -183,6 +183,42 @@ fn setting_the_input_it_is_already_on_still_writes() {
     assert!(text.contains("stored 0x11"), "{text}");
 }
 
+/// A read-back is the monitor quoting its own register, so it must never be
+/// written into the configuration as evidence about the input.
+///
+/// A real panel stored 0x03 — DVI, a socket it does not have — stayed awake
+/// on the input it was already showing, read 0x03 back, and got recorded as
+/// `write-confirmed`.
+#[test]
+fn a_read_back_is_never_recorded_as_evidence() {
+    let sandbox = Sandbox::new("no-learning");
+    sandbox.write_config(config());
+    let out = sandbox.run(&["set", "FAKE-SN-L", "0x0F"]);
+    assert!(out.status.success(), "{}", combined(&out));
+
+    let saved = std::fs::read_to_string(sandbox.config_path()).expect("read config");
+    assert!(!saved.contains("write-confirmed"), "{saved}");
+    assert!(!saved.contains("read-confirmed"), "{saved}");
+}
+
+/// The warning about an unverified input is the only thing standing between
+/// a person and a monitor asleep on an empty socket. Using an input once must
+/// not be enough to silence it; only someone watching the screen can.
+#[test]
+fn the_unverified_input_warning_survives_use() {
+    let sandbox = Sandbox::new("warning-sticks");
+    sandbox.write_config(config());
+    for attempt in 1..=2 {
+        let out = sandbox.run(&["set", "FAKE-SN-L", "0x0F"]);
+        assert!(out.status.success(), "{}", combined(&out));
+        assert!(
+            combined(&out).contains("nothing has confirmed"),
+            "attempt {attempt} did not warn: {}",
+            combined(&out)
+        );
+    }
+}
+
 #[test]
 fn a_bare_decimal_code_is_rejected_as_ambiguous() {
     let sandbox = Sandbox::new("bad-code");
