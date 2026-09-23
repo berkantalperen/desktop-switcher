@@ -178,6 +178,24 @@ built-in Windows backend; the next save writes `backend = "windows"`. Monitor
 ids are the same format, so every binding carries over. PowerToys is no longer
 needed for this tool.
 
+### A hotkey does nothing
+
+The tray icon registers the hotkeys, so it has to be running: opening Desktop
+Switcher from the Start Menu starts it. If a combination is held by another
+program, the tray shows "A hotkey is not available" once, naming it, and keeps
+trying every couple of seconds; pick a different combination, or close the
+program holding it.
+
+Older versions carried hotkeys on per-action Start Menu shortcuts. The
+installer removes those, since while they exist Explorer holds their keys and
+the tray cannot have them.
+
+### Ghost icons in the notification area
+
+A tray icon whose program was killed stays drawn until the mouse passes over
+it. The installer asks the running tray to close rather than killing it, so
+this should not happen on upgrade; hovering clears any left over.
+
 ### `An Application Control policy has blocked this file` (os error 4551)
 
 Smart App Control. It blocks unsigned executables it has no reputation for, and

@@ -471,6 +471,43 @@ pub fn set_input(
     Ok(report.exit_code())
 }
 
+/// Flip a monitor between two inputs, then set it exactly as `set` would.
+///
+/// The decision is the only new thing here: which of the two to set, from
+/// what the monitor reports. Everything after that — binding, the write, the
+/// read-back, the report — is `set_input`, so a toggle is held to the same
+/// rules as any other switch.
+pub fn toggle_input(
+    app: &App,
+    monitor: &str,
+    between: [InputCode; 2],
+    dry_run: bool,
+    force: bool,
+) -> Result<i32> {
+    let config = require_config(app)?;
+    let detected = app.backend.discover().context("enumerating displays")?;
+    let plan = match switch::plan_set_input(config, &detected, monitor, between[0]) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Refusing to change the input.\n\n{e}");
+            ui::eprint_recovery_note();
+            return Ok(2);
+        }
+    };
+    let reported = app
+        .backend
+        .read_input(&plan.handle)
+        .ok()
+        .and_then(|reading| reading.value());
+    let target = switch::toggle_target(reported, between);
+    println!(
+        "  {} reports {}; toggling to {target}",
+        plan.label,
+        reported.map_or_else(|| "nothing readable".to_string(), |c| c.to_string())
+    );
+    set_input(app, monitor, &target.to_string(), dry_run, force)
+}
+
 /// Record the one thing a switch can teach us about an input unattended.
 ///
 /// A monitor that goes silent right after a write has moved somewhere that is
@@ -713,6 +750,9 @@ fn run_step(app: &App, step: &ActionStep) -> Result<i32> {
         // deduplicated; taking either again here would fight itself.
         ActionStep::SetInput { monitor, code } => {
             set_input(app, monitor, &code.to_string(), false, true)
+        }
+        ActionStep::ToggleInput { monitor, between } => {
+            toggle_input(app, monitor, *between, false, true)
         }
         ActionStep::Sweep { monitor } => desktop::sweep(app, monitor.as_deref()),
         ActionStep::RestoreWindows { monitor } => desktop::restore_windows(app, monitor.as_deref()),

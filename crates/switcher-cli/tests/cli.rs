@@ -217,6 +217,52 @@ fn switching_to_a_configured_input_is_quiet() {
     );
 }
 
+/// The fake left panel starts on 0x11, so a toggle reads that and goes to
+/// the other input of the pair.
+#[test]
+fn a_toggle_sets_the_input_the_monitor_is_not_on() {
+    let sandbox = Sandbox::new("toggle");
+    sandbox.write_config(config());
+    let out = sandbox.run(&["toggle", "FAKE-SN-L", "0x11", "0x0F"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("reports 0x11; toggling to 0x0F"), "{text}");
+    assert!(text.contains("stored 0x0F"), "{text}");
+}
+
+/// On neither input of the pair, a toggle goes to the first — never to
+/// anything the person did not name.
+#[test]
+fn a_toggle_from_outside_the_pair_goes_to_the_first() {
+    let sandbox = Sandbox::new("toggle-outside");
+    sandbox.write_config(config());
+    let out = sandbox.run(&["toggle", "FAKE-SN-L", "0x0F", "0x03"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    assert!(
+        stdout_of(&out).contains("toggling to 0x0F"),
+        "{}",
+        stdout_of(&out)
+    );
+}
+
+#[test]
+fn an_action_can_toggle() {
+    let sandbox = Sandbox::new("toggle-action");
+    sandbox.write_config(&format!(
+        "{}\n[[actions]]\nname = \"Toggle left\"\nhotkey = \"SHIFT+F24\"\n\n\
+         [[actions.steps]]\nkind = \"toggle-input\"\nmonitor = \"FAKE-SN-L\"\n\
+         between = [\"0x11\", \"0x0F\"]\n",
+        config()
+    ));
+    let out = sandbox.run(&["run-action", "Toggle left"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    assert!(
+        stdout_of(&out).contains("toggling to 0x0F"),
+        "{}",
+        stdout_of(&out)
+    );
+}
+
 #[test]
 fn a_bare_decimal_code_is_rejected_as_ambiguous() {
     let sandbox = Sandbox::new("bad-code");

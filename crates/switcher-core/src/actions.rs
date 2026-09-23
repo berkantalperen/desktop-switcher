@@ -27,6 +27,16 @@ pub enum ActionStep {
     /// the hardware actually offers. "Everything to the desktop" is a person's
     /// idea, and it is expressed by putting several of these in one action.
     SetInput { monitor: String, code: InputCode },
+    /// Flip one monitor between two inputs: to the second if it reports the
+    /// first, otherwise to the first.
+    ///
+    /// Only ever one of the two, so one key can alternate a monitor between
+    /// the two computers on it without ever landing on a third input. See
+    /// [`crate::switch::toggle_target`] for how the monitor's report is used.
+    ToggleInput {
+        monitor: String,
+        between: [InputCode; 2],
+    },
     /// Move windows off a monitor without detaching it.
     Sweep {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,7 +86,9 @@ impl ActionStep {
     /// saved, rather than when a hotkey is pressed.
     pub fn monitor_name(&self) -> Option<&str> {
         match self {
-            ActionStep::SetInput { monitor, .. } => Some(monitor),
+            ActionStep::SetInput { monitor, .. } | ActionStep::ToggleInput { monitor, .. } => {
+                Some(monitor)
+            }
             ActionStep::Sweep { monitor }
             | ActionStep::RestoreWindows { monitor }
             | ActionStep::Release { monitor }
@@ -90,6 +102,9 @@ impl ActionStep {
         let target = |m: &Option<String>| m.clone().unwrap_or_else(|| "the only monitor".into());
         match self {
             ActionStep::SetInput { monitor, code } => format!("set {monitor} to {code}"),
+            ActionStep::ToggleInput { monitor, between } => {
+                format!("toggle {monitor} between {} and {}", between[0], between[1])
+            }
             ActionStep::Sweep { monitor } => format!("sweep windows off {}", target(monitor)),
             ActionStep::RestoreWindows { monitor } => {
                 format!("restore windows onto {}", target(monitor))
@@ -179,6 +194,18 @@ impl Action {
                     return Err(format!(
                         "`{}` has a set-input step with no monitor",
                         self.name
+                    ));
+                }
+            }
+            if let ActionStep::ToggleInput { monitor, between } = step {
+                if monitor.trim().is_empty() {
+                    return Err(format!("`{}` has a toggle step with no monitor", self.name));
+                }
+                if between[0] == between[1] {
+                    return Err(format!(
+                        "`{}` toggles {monitor} between {} and itself, so it would never \
+                         change anything",
+                        self.name, between[0]
                     ));
                 }
             }
@@ -285,6 +312,44 @@ mod tests {
         let text = toml::to_string_pretty(&wrapper).unwrap();
         assert!(text.contains("kind = \"set-input\""), "{text}");
         assert_eq!(toml::from_str::<Wrapper>(&text).unwrap(), wrapper);
+    }
+
+    /// Written the way a person would write it in config.toml.
+    #[test]
+    fn a_toggle_reads_from_the_configuration() {
+        let text = r#"
+[[actions]]
+name = "Toggle center"
+hotkey = "F24"
+
+[[actions.steps]]
+kind = "toggle-input"
+monitor = "ASFPA9A001108"
+between = ["0x11", "0x0F"]
+"#;
+        let wrapper: Wrapper = toml::from_str(text).unwrap();
+        let step = &wrapper.actions[0].steps[0];
+        assert_eq!(
+            step,
+            &ActionStep::ToggleInput {
+                monitor: "ASFPA9A001108".into(),
+                between: [InputCode(0x11), InputCode(0x0F)],
+            }
+        );
+        assert_eq!(step.monitor_name(), Some("ASFPA9A001108"));
+        assert_eq!(step.summary(), "toggle ASFPA9A001108 between 0x11 and 0x0F");
+        let again = toml::to_string_pretty(&wrapper).unwrap();
+        assert_eq!(toml::from_str::<Wrapper>(&again).unwrap(), wrapper);
+    }
+
+    #[test]
+    fn a_toggle_between_an_input_and_itself_is_rejected() {
+        let mut a = action("Pointless", None);
+        a.steps = vec![ActionStep::ToggleInput {
+            monitor: "SN-1".into(),
+            between: [InputCode(0x11), InputCode(0x11)],
+        }];
+        assert!(a.validate().unwrap_err().contains("itself"));
     }
 
     #[test]

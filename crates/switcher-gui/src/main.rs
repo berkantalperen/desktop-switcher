@@ -20,6 +20,7 @@ use switcher_core::config::{self, Config, MonitorInput};
 use switcher_core::types::InputCode;
 
 fn main() -> eframe::Result<()> {
+    start_tray();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([820.0, 640.0])
@@ -40,6 +41,24 @@ fn main() -> eframe::Result<()> {
         Box::new(|_cc| Ok(Box::new(SwitcherApp::new()))),
     )
 }
+
+/// Make sure the tray is running: it carries the hotkeys, and this is the one
+/// Start Menu entry, so opening it is how someone gets the tray back after
+/// quitting it. The tray allows only one of itself, so starting it when it is
+/// already running does nothing.
+#[cfg(windows)]
+fn start_tray() {
+    if let Ok(mut here) = std::env::current_exe() {
+        here.pop();
+        let tray = here.join("desktop-switcher-tray.exe");
+        if tray.is_file() {
+            let _ = std::process::Command::new(tray).spawn();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn start_tray() {}
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
@@ -552,6 +571,10 @@ impl SwitcherApp {
                             action.steps.push(default_set_input(&monitors));
                             dirty = true;
                         }
+                        if ui.button("+ Toggle input").clicked() {
+                            action.steps.push(default_toggle(&monitors));
+                            dirty = true;
+                        }
                         if ui.button("+ Sweep").clicked() {
                             action.steps.push(ActionStep::Sweep {
                                 monitor: monitors.first().map(|m| m.0.clone()),
@@ -608,10 +631,16 @@ impl SwitcherApp {
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.label("Hotkeys are registered with the operating system by the installer scripts:");
-        ui.monospace(r".\scripts\install-windows-shortcuts.ps1");
-        ui.monospace("./scripts/install-gnome-shortcuts.sh");
-        ui.small("Save first — the installers read the saved configuration.");
+        if cfg!(windows) {
+            ui.label(
+                "Hotkeys are registered by the tray icon, and take effect a couple of \
+                 seconds after you save. Write them like CTRL+ALT+1, F24 or SHIFT+F24.",
+            );
+        } else {
+            ui.label("Hotkeys are bound as GNOME custom shortcuts by:");
+            ui.monospace("./scripts/install-gnome-shortcuts.sh");
+            ui.small("Save first — it reads the saved configuration.");
+        }
 
         if dirty {
             self.dirty = true;
@@ -638,6 +667,32 @@ fn default_set_input(monitors: &[MonitorChoice]) -> ActionStep {
     }
 }
 
+/// A toggle on the first monitor between its first two inputs, preferring
+/// ones someone named.
+fn default_toggle(monitors: &[MonitorChoice]) -> ActionStep {
+    let (key, _, inputs) = monitors.first().cloned().unwrap_or_default();
+    let mut codes: Vec<InputCode> = inputs
+        .iter()
+        .filter(|i| {
+            i.label
+                .as_deref()
+                .is_some_and(|l| Some(l) != i.input_code.standard_label())
+        })
+        .map(|i| i.input_code)
+        .collect();
+    codes.extend(inputs.iter().map(|i| i.input_code));
+    let first = codes.first().copied().unwrap_or(InputCode(0x11));
+    let second = codes
+        .iter()
+        .copied()
+        .find(|c| *c != first)
+        .unwrap_or(InputCode(0x0F));
+    ActionStep::ToggleInput {
+        monitor: key,
+        between: [first, second],
+    }
+}
+
 /// One step's editor. Returns whether anything changed.
 fn step_editor(
     ui: &mut egui::Ui,
@@ -658,6 +713,7 @@ fn step_editor(
         .show_ui(ui, |ui| {
             for option in [
                 StepKind::SetInput,
+                StepKind::ToggleInput,
                 StepKind::Sweep,
                 StepKind::RestoreWindows,
                 StepKind::Run,
@@ -680,46 +736,16 @@ fn step_editor(
 
     match step {
         ActionStep::SetInput { monitor, code } => {
-            let label_for = |key: &str| {
-                monitors
-                    .iter()
-                    .find(|(k, _, _)| k == key)
-                    .map(|(_, l, _)| l.clone())
-                    .unwrap_or_else(|| key.to_string())
-            };
-            egui::ComboBox::from_id_salt(format!("{id}-mon"))
-                .selected_text(label_for(monitor))
-                .width(200.0)
-                .show_ui(ui, |ui| {
-                    for (key, label, _) in monitors {
-                        if ui.selectable_value(monitor, key.clone(), label).clicked() {
-                            changed = true;
-                        }
-                    }
-                });
-
-            let inputs = monitors
-                .iter()
-                .find(|(k, _, _)| k == monitor)
-                .map(|(_, _, i)| i.clone())
-                .unwrap_or_default();
-            let current = inputs
-                .iter()
-                .find(|i| i.input_code == *code)
-                .map(|i| format!("{}  ({})", i.display_name(), i.input_code))
-                .unwrap_or_else(|| code.to_string());
-
-            egui::ComboBox::from_id_salt(format!("{id}-code"))
-                .selected_text(current)
-                .width(190.0)
-                .show_ui(ui, |ui| {
-                    for input in &inputs {
-                        let text = format!("{}  ({})", input.display_name(), input.input_code);
-                        if ui.selectable_value(code, input.input_code, text).clicked() {
-                            changed = true;
-                        }
-                    }
-                });
+            changed |= monitor_picker(ui, &format!("{id}-mon"), monitor, monitors);
+            changed |= input_picker(ui, &format!("{id}-code"), code, monitor, monitors);
+        }
+        ActionStep::ToggleInput { monitor, between } => {
+            changed |= monitor_picker(ui, &format!("{id}-mon"), monitor, monitors);
+            ui.label("between");
+            let [first, second] = between;
+            changed |= input_picker(ui, &format!("{id}-a"), first, monitor, monitors);
+            ui.label("and");
+            changed |= input_picker(ui, &format!("{id}-b"), second, monitor, monitors);
         }
         ActionStep::Sweep { monitor }
         | ActionStep::RestoreWindows { monitor }
@@ -778,9 +804,69 @@ fn step_editor(
     changed
 }
 
+/// Choose which monitor a step acts on. Returns whether it changed.
+fn monitor_picker(
+    ui: &mut egui::Ui,
+    id: &str,
+    monitor: &mut String,
+    monitors: &[MonitorChoice],
+) -> bool {
+    let mut changed = false;
+    let shown = monitors
+        .iter()
+        .find(|(k, _, _)| k == monitor)
+        .map(|(_, l, _)| l.clone())
+        .unwrap_or_else(|| monitor.clone());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for (key, label, _) in monitors {
+                if ui.selectable_value(monitor, key.clone(), label).clicked() {
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// Choose one of a monitor's configured inputs. Returns whether it changed.
+fn input_picker(
+    ui: &mut egui::Ui,
+    id: &str,
+    code: &mut InputCode,
+    monitor: &str,
+    monitors: &[MonitorChoice],
+) -> bool {
+    let mut changed = false;
+    let inputs = monitors
+        .iter()
+        .find(|(k, _, _)| k == monitor)
+        .map(|(_, _, i)| i.clone())
+        .unwrap_or_default();
+    let shown = inputs
+        .iter()
+        .find(|i| i.input_code == *code)
+        .map(|i| format!("{}  ({})", i.display_name(), i.input_code))
+        .unwrap_or_else(|| code.to_string());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .width(190.0)
+        .show_ui(ui, |ui| {
+            for input in &inputs {
+                let text = format!("{}  ({})", input.display_name(), input.input_code);
+                if ui.selectable_value(code, input.input_code, text).clicked() {
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum StepKind {
     SetInput,
+    ToggleInput,
     Sweep,
     RestoreWindows,
     Release,
@@ -792,6 +878,7 @@ enum StepKind {
 fn step_kind(step: &ActionStep) -> StepKind {
     match step {
         ActionStep::SetInput { .. } => StepKind::SetInput,
+        ActionStep::ToggleInput { .. } => StepKind::ToggleInput,
         ActionStep::Sweep { .. } => StepKind::Sweep,
         ActionStep::RestoreWindows { .. } => StepKind::RestoreWindows,
         ActionStep::Release { .. } => StepKind::Release,
@@ -804,6 +891,7 @@ fn step_kind(step: &ActionStep) -> StepKind {
 fn kind_label(kind: StepKind) -> &'static str {
     match kind {
         StepKind::SetInput => "Set input",
+        StepKind::ToggleInput => "Toggle input",
         StepKind::Sweep => "Sweep windows",
         StepKind::RestoreWindows => "Restore windows",
         StepKind::Release => "Release (exp.)",
@@ -817,6 +905,7 @@ fn default_step(kind: StepKind, monitors: &[MonitorChoice]) -> ActionStep {
     let monitor = monitors.first().map(|m| m.0.clone());
     match kind {
         StepKind::SetInput => default_set_input(monitors),
+        StepKind::ToggleInput => default_toggle(monitors),
         StepKind::Sweep => ActionStep::Sweep { monitor },
         StepKind::RestoreWindows => ActionStep::RestoreWindows { monitor },
         StepKind::Release => ActionStep::Release { monitor },

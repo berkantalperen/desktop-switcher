@@ -39,6 +39,18 @@ pub fn cannot_start(describe: &str, why: &str) -> Notice {
     }
 }
 
+/// The notice when one or more hotkeys could not be registered.
+pub fn hotkeys_unavailable(problems: &[String]) -> Notice {
+    let title = match problems.len() {
+        1 => "A hotkey is not available".to_string(),
+        n => format!("{n} hotkeys are not available"),
+    };
+    Notice {
+        title: clip(&title, TITLE_MAX),
+        body: clip(&problems.join("; "), BODY_MAX),
+    }
+}
+
 /// The one line of a CLI report that says why.
 fn reason(output: &str) -> String {
     let lines: Vec<&str> = output
@@ -151,5 +163,15 @@ If a screen goes blank or stops responding:
         assert!(n.title.chars().count() <= TITLE_MAX);
         assert!(n.body.chars().count() <= BODY_MAX);
         assert!(n.body.ends_with('…'));
+    }
+
+    #[test]
+    fn unavailable_hotkeys_are_named() {
+        let one = hotkeys_unavailable(&["F24 for “Toggle center” is taken".into()]);
+        assert_eq!(one.title, "A hotkey is not available");
+        assert!(one.body.contains("F24"));
+        let two = hotkeys_unavailable(&["a".into(), "b".into()]);
+        assert_eq!(two.title, "2 hotkeys are not available");
+        assert_eq!(two.body, "a; b");
     }
 }

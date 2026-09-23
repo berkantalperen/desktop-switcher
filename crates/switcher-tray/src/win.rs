@@ -4,12 +4,13 @@
 //! a hotkey does, so the tray has no switching logic of its own and cannot
 //! drift from the rules the CLI enforces.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command as Process;
+use std::time::SystemTime;
 
 use switcher_core::config::{self, Config, ConfigError};
 use windows::core::{w, BOOL, PCWSTR};
@@ -25,6 +26,9 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW,
@@ -35,10 +39,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
     SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON, HMENU, ICONINFO, MB_ICONERROR,
     MB_OK, MENU_ITEM_FLAGS, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_DESTROY,
-    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
+use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
 
+use crate::hotkey::{self, Binding};
 use crate::menu::{self, Command, Entry};
 use crate::notice::{self, Notice};
 
@@ -49,12 +55,27 @@ const WM_NOTICE: u32 = WM_APP + 2;
 const TRAY_ID: u32 = 1;
 /// `CREATE_NO_WINDOW`: run the console CLI without flashing a console.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// How often the configuration is checked for changed hotkeys, and hotkeys
+/// another program was holding are tried again.
+const HOTKEY_TIMER: usize = 1;
+const HOTKEY_POLL_MS: u32 = 2000;
+
+/// One action's hotkey and whether Windows has granted it.
+struct Slot {
+    binding: Binding,
+    registered: bool,
+}
 
 thread_local! {
     static ICON: Cell<HICON> = const { Cell::new(HICON(std::ptr::null_mut())) };
     /// Explorer broadcasts this after restarting, and every tray icon
     /// vanishes with the old taskbar unless it adds itself again.
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
+    static SLOTS: RefCell<Vec<Slot>> = const { RefCell::new(Vec::new()) };
+    /// When the configuration was last read for hotkeys.
+    static CONFIG_STAMP: Cell<Option<SystemTime>> = const { Cell::new(None) };
+    /// The hotkey problems last reported, so each is said once, not every poll.
+    static REPORTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn run() -> i32 {
@@ -120,6 +141,8 @@ fn start() -> windows::core::Result<i32> {
         let size = GetSystemMetrics(SM_CXSMICON).max(16) as u32;
         ICON.set(make_icon(size)?);
         add_icon(hwnd);
+        sync_hotkeys(hwnd);
+        SetTimer(Some(hwnd), HOTKEY_TIMER, HOTKEY_POLL_MS, None);
 
         let mut msg = MSG::default();
         loop {
@@ -156,7 +179,34 @@ unsafe extern "system" fn window_proc(
             show_notice(hwnd, &notice);
             LRESULT(0)
         }
+        WM_HOTKEY => {
+            let id = wparam.0 as i32;
+            let action = SLOTS.with_borrow(|slots| {
+                slots
+                    .iter()
+                    .find(|s| s.binding.id == id)
+                    .map(|s| s.binding.action.clone())
+            });
+            if let Some(action) = action {
+                perform(
+                    hwnd,
+                    Command::Cli {
+                        args: vec!["run-action".into(), action.clone()],
+                        describe: action,
+                    },
+                );
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == HOTKEY_TIMER => {
+            sync_hotkeys(hwnd);
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), HOTKEY_TIMER);
+            }
+            unregister_all(hwnd);
             remove_icon(hwnd);
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -167,6 +217,82 @@ unsafe extern "system" fn window_proc(
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// Register every action's hotkey, following the configuration.
+///
+/// Re-reads the hotkeys when the configuration file changes, so an edit in
+/// the GUI takes effect within a couple of seconds. A hotkey another program
+/// holds is tried again on every poll, which also covers the moment right
+/// after an upgrade when Explorer has not yet let go of the old shortcut
+/// hotkeys. Problems are reported once each, not on every poll.
+fn sync_hotkeys(hwnd: HWND) {
+    let stamp = config::default_config_path()
+        .ok()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    if stamp != CONFIG_STAMP.get() {
+        CONFIG_STAMP.set(stamp);
+        unregister_all(hwnd);
+        let fresh = load_config()
+            .map(|c| hotkey::bindings(&c))
+            .unwrap_or_default();
+        SLOTS.with_borrow_mut(|slots| {
+            *slots = fresh
+                .into_iter()
+                .map(|binding| Slot {
+                    binding,
+                    registered: false,
+                })
+                .collect();
+        });
+    }
+
+    let mut problems = Vec::new();
+    SLOTS.with_borrow_mut(|slots| {
+        for slot in slots.iter_mut().filter(|s| !s.registered) {
+            let shown = menu::pretty_hotkey(&slot.binding.text);
+            match &slot.binding.hotkey {
+                Err(why) => problems.push(format!("“{}”: {why}", slot.binding.action)),
+                Ok(key) => {
+                    let granted = unsafe {
+                        RegisterHotKey(
+                            Some(hwnd),
+                            slot.binding.id,
+                            HOT_KEY_MODIFIERS(key.modifiers) | MOD_NOREPEAT,
+                            key.key,
+                        )
+                    };
+                    match granted {
+                        Ok(()) => slot.registered = true,
+                        Err(_) => problems.push(format!(
+                            "{shown} for “{}” is taken by another program",
+                            slot.binding.action
+                        )),
+                    }
+                }
+            }
+        }
+    });
+
+    let news = REPORTED.with_borrow(|last| *last != problems);
+    if news {
+        if !problems.is_empty() {
+            show_notice(hwnd, &notice::hotkeys_unavailable(&problems));
+        }
+        REPORTED.set(problems);
+    }
+}
+
+fn unregister_all(hwnd: HWND) {
+    SLOTS.with_borrow_mut(|slots| {
+        for slot in slots.iter_mut().filter(|s| s.registered) {
+            unsafe {
+                let _ = UnregisterHotKey(Some(hwnd), slot.binding.id);
+            }
+            slot.registered = false;
+        }
+    });
 }
 
 fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {

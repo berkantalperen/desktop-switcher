@@ -53,6 +53,24 @@ pub struct PlannedSet {
     pub advertised: bool,
 }
 
+/// Which of two inputs a toggle sets, given what the monitor reports.
+///
+/// The second when the monitor reports the first, and the first otherwise —
+/// including when it reports something else, or nothing. Deterministic, and
+/// only ever one of the two inputs someone chose, so a toggle can never send
+/// a monitor anywhere else.
+///
+/// What the monitor reports is the value it last stored, which is usually but
+/// not always what it is showing. When the two disagree, one press sets the
+/// input it is already on and appears to do nothing; that write corrects the
+/// stored value, so the next press toggles.
+pub fn toggle_target(reported: Option<InputCode>, between: [InputCode; 2]) -> InputCode {
+    match reported {
+        Some(code) if code == between[0] => between[1],
+        _ => between[0],
+    }
+}
+
 /// Resolve "set this monitor to this input" against what is actually attached.
 pub fn plan_set_input(
     config: &Config,
@@ -455,6 +473,22 @@ mod tests {
     use super::*;
     use crate::config::{BackendKind, MonitorConfig, MonitorInput};
     use crate::fake::{FakeBackend, FakeBehavior, FakeMonitor};
+
+    const PAIR: [InputCode; 2] = [InputCode(0x11), InputCode(0x0F)];
+
+    #[test]
+    fn a_toggle_goes_to_the_other_input() {
+        assert_eq!(toggle_target(Some(InputCode(0x11)), PAIR), InputCode(0x0F));
+        assert_eq!(toggle_target(Some(InputCode(0x0F)), PAIR), InputCode(0x11));
+    }
+
+    /// A monitor on some third input, or one that cannot be read, goes to the
+    /// first of the pair: never to anything the person did not choose.
+    #[test]
+    fn a_toggle_from_anywhere_else_goes_to_the_first() {
+        assert_eq!(toggle_target(Some(InputCode(0x01)), PAIR), InputCode(0x11));
+        assert_eq!(toggle_target(None, PAIR), InputCode(0x11));
+    }
 
     const HDMI: u8 = 0x11;
     const DP: u8 = 0x0F;

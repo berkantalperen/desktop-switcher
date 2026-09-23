@@ -102,6 +102,26 @@ enum Command {
         force: bool,
     },
 
+    /// Flip a monitor between two inputs.
+    ///
+    /// Sets the second input if the monitor reports the first, and the first
+    /// otherwise. Only ever one of the two.
+    Toggle {
+        /// Monitor name, key or serial, as shown by `monitors`.
+        monitor: String,
+        /// The first input, e.g. `0x11`. Also used when the monitor reports
+        /// anything else, or cannot be read.
+        first: String,
+        /// The second input, e.g. `0x0F`.
+        second: String,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Ignore the repeat-press guard.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Record which monitors exist and what inputs they offer.
     Configure,
 
@@ -244,6 +264,17 @@ fn run() -> Result<i32> {
             dry_run,
             force,
         } => commands::set_input(&app, &monitor, &code, dry_run, force),
+        Command::Toggle {
+            monitor,
+            first,
+            second,
+            dry_run,
+            force,
+        } => {
+            let first = first.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let second = second.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+            commands::toggle_input(&app, &monitor, [first, second], dry_run, force)
+        }
         Command::Configure => commands::configure(&mut app),
         Command::Doctor => commands::doctor(&app),
         Command::Status => commands::status(&app),

@@ -71,7 +71,9 @@ verification = "reported"
 
 
 # An action is a named list of steps, run in order, stopping at the first that
-# fails. A hotkey is optional; the installers bind the ones you set.
+# fails. A hotkey is optional: modifiers (CTRL, ALT, SHIFT, WIN) plus one key,
+# such as "CTRL+ALT+2", "F24" or "SHIFT+F24". On Windows the tray icon
+# registers them; on GNOME, run scripts/install-gnome-shortcuts.sh.
 [[actions]]
 name = "Workstation"
 hotkey = "CTRL+ALT+2"
@@ -82,6 +84,17 @@ hotkey = "CTRL+ALT+2"
 kind = "set-input"
 monitor = "left"
 code = "0x0F"
+
+# Flip a monitor between two inputs: the second if it reports the first, the
+# first otherwise. Only ever one of the two.
+[[actions]]
+name = "Toggle left"
+hotkey = "F24"
+
+[[actions.steps]]
+kind = "toggle-input"
+monitor = "left"
+between = ["0x11", "0x0F"]
 
 # Run any program. Arguments are a list and never pass through a shell.
 # [[actions.steps]]

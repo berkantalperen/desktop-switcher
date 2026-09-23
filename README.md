@@ -34,7 +34,8 @@ Building needs Rust 1.82 or newer.
 
 ```powershell
 # Windows, after `cargo build --release`. Installs the CLI, the GUI and the
-# tray icon, starts the tray and has it start at login, binds your hotkeys.
+# tray icon, with one Start Menu entry; starts the tray, which carries your
+# hotkeys, and has it start at login.
 .\scripts\install-windows.ps1
 ```
 
@@ -68,9 +69,28 @@ serial). Input codes are the monitor's own VCP 0x60 values, always written with
 `0x`; `monitors` lists the ones each monitor claims.
 
 Then compose **actions** — a named list of steps with an optional hotkey — in
-the GUI (`desktop-switcher-gui`) or in `config.toml`, and run the installer
-again to bind the hotkeys. An action can set several monitors, move windows,
-or run any program.
+the GUI (`desktop-switcher-gui`) or in `config.toml`. An action can set
+several monitors, flip one between two inputs, move windows, or run any
+program. On Windows the hotkeys take effect a couple of seconds after you save;
+on GNOME, run `install-gnome-shortcuts.sh` again.
+
+For example, one key that flips a monitor between the two computers on it:
+
+```toml
+[[actions]]
+name = "Toggle center"
+hotkey = "F24"
+
+[[actions.steps]]
+kind = "toggle-input"
+monitor = "ASFPA9A001108"
+between = ["0x11", "0x0F"]
+```
+
+A toggle sets the second input when the monitor reports the first, and the
+first otherwise — only ever one of the two. What the monitor reports is the
+value it last stored; if something changed the input without updating that,
+one press sets the input it is already on and the next press toggles.
 
 ### Finding which code is which
 
@@ -163,6 +183,7 @@ The rules the code enforces, each with tests behind it:
 |---|---|---|
 | `monitors` | no | Every monitor, its inputs, and what it reports it is showing |
 | `set <monitor> <code>` | **yes** | Set one monitor to one input (`--dry-run` to only plan it) |
+| `toggle <monitor> <a> <b>` | **yes** | Set `b` if the monitor reports `a`, and `a` otherwise |
 | `run-action <name>` | **yes** | Run a configured action |
 | `actions` | no | List configured actions and their hotkeys |
 | `configure` | config only | Record which monitors exist and what inputs they offer |
@@ -198,7 +219,9 @@ hotkey does, without a console window.
   named, every input is listed.
 - It is silent when a switch works. When one does not, it shows a notification
   with the reason, taken from the CLI's report.
-- Only one runs at a time. To keep it visible, drag it out of the `^` overflow
+- It registers your actions' hotkeys (below).
+- Only one runs at a time, and opening Desktop Switcher from the Start Menu
+  starts it if you quit it. To keep it visible, drag it out of the `^` overflow
   onto the taskbar, or turn it on under **Settings → Personalization → Taskbar
   → Other system tray icons**.
 
@@ -206,13 +229,20 @@ hotkey does, without a console window.
 
 ## Keyboard shortcuts
 
-Both installers read your actions from the configuration, bind each hotkey to
-`run-action`, need no elevation, and undo cleanly (`-Uninstall` /
-`--uninstall`).
+Write hotkeys like `CTRL+ALT+1`, `F24` or `SHIFT+F24`: any of Ctrl, Alt, Shift
+and Win, plus one key — a letter, digit, F1–F24, a numpad digit, or a named key
+such as `PAGEDOWN` or `SPACE`.
 
-On Windows a Start Menu shortcut carries the hotkey, which is why the installer
-puts it there. On GNOME it is a custom shortcut, because under Wayland an
-application cannot reliably grab keys for itself.
+**Windows:** the tray registers them itself. They fire instantly, need no
+shortcut files, and follow the configuration: an edit takes effect within a
+couple of seconds of saving. If another program already holds a combination,
+the tray says so once and keeps trying, so it picks the key up when the other
+program lets go.
+
+**GNOME:** `./scripts/install-gnome-shortcuts.sh` binds each hotkey as a
+custom shortcut that runs `run-action` (`--uninstall` removes them). Under
+Wayland an application cannot reliably grab keys for itself, so GNOME has to do
+it.
 
 ---
 
