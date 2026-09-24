@@ -1,9 +1,47 @@
 # Hardware inventory
 
-Stage A evidence. Everything here was captured from the machines themselves;
-nothing is inferred from monitor model numbers or from the project plan.
+Evidence captured from the machines the tool was built against; nothing is
+inferred from model numbers. The sections below are a **dated log, oldest
+first**, kept because each design rule in the README traces back to something
+observed here. Status lines inside an older section were true when written and
+may since have been overtaken; where it matters, they say so.
 
-Each claim is tagged with how strongly it is known:
+## Current setup (2026-09-24)
+
+| | Laptop (BERKANT16X) | Workstation (HP Z4 G4) |
+|---|---|---|
+| OS | Windows 11 Home 10.0.26200 | Ubuntu 26.04.1, GNOME 50.1 (Wayland) |
+| Backend | `windows` (dxva2, built in) | `ddcutil-cli`, ddcutil 2.2.5 |
+| Hotkeys | the tray registers them | GNOME custom shortcuts |
+| Tray | notification area | top bar, via Ubuntu's AppIndicator extension |
+
+Two AOC 27P2DG5 panels, each cabled to both computers identically; every code
+below was confirmed by someone watching the switch:
+
+| Panel | Serial | Laptop | Workstation |
+|---|---|---|---|
+| left | `ASFPA9A001109` | HDMI-1 `0x11` (through an HDMI↔DP cable) | DisplayPort-1 `0x0F` (`card1-DP-4`) |
+| center | `ASFPA9A001108` | HDMI-1 `0x11` | DisplayPort-1 `0x0F` (`card1-DP-1`) |
+
+The facts that shaped the design, each detailed below:
+
+- The input register reports what was last **stored**, not what is shown — one
+  panel read `0x0F` for a week while showing HDMI. So a read-back is never
+  confirmation, and a write is never skipped because the read already matches.
+- A panel on an input with no picture **sleeps and ignores DDC/CI entirely**.
+- An awake panel answers **both** computers, whichever it is showing.
+- The converter cable carries short DDC/CI exchanges but not the long
+  capabilities string. PowerToys hid that panel for it, which is why the
+  Windows backend now talks to Windows' API directly and discovery never talks
+  DDC.
+- Windows briefly shows displays as missing or mirrored after a panel changes
+  input, so writes wait for the topology to settle.
+- Two panels showing the same computer can need different codes, so every
+  monitor is its own mapping.
+
+---
+
+Each claim below is tagged with how strongly it was known at the time:
 
 | Tag | Meaning |
 |---|---|
@@ -17,7 +55,8 @@ Each claim is tagged with how strongly it is known:
 
 ## Windows host — captured 2026-09-16
 
-**Status: complete for this host.**
+At the time the Windows backend drove PowerToys' Power Display CLI, and the
+monitors were cabled differently; both have since changed (see 2026-09-23).
 
 | | |
 |---|---|
@@ -90,17 +129,16 @@ write per monitor, with that monitor's own code, and reports each separately.
 ### Raw evidence
 
 Verbatim CLI output is preserved in `tests/fixtures/powertoys/`, with stdout,
-stderr and exit status captured separately. The parser tests run against those
-files, so a future PowerToys release that changes the output format breaks the
-tests rather than silently misreading a monitor id.
+stderr and exit status captured separately. No code reads it any more; it is
+kept as evidence.
 
 ---
 
 ## Ubuntu host (HP Z4) — partially captured 2026-09-16
 
-**Status: system inspected, DDC not yet reachable.** Captured over SSH with the
-read-only preflight script plus direct sysfs reads. No write of any kind was
-made to this host.
+Captured over SSH with the read-only preflight script plus direct sysfs reads,
+before `ddcutil` was installed; the subsections after "ddcutil — installed and
+working" follow on from there.
 
 | | |
 |---|---|
@@ -123,8 +161,8 @@ The Quadro M2000 presents four DisplayPort connectors and **no HDMI**:
 | `card1-DP-3` | disconnected |
 | `card1-DP-4` | **connected** |
 
-**Only one display is linked to the Z4.** See "The cabling question" below;
-this is the most consequential open item in the project.
+**Only one display was linked to the Z4** then. See "The cabling question"
+below; it was settled by recabling on 2026-09-23.
 
 EDID is not exposed through sysfs — every connector reports `edid=0B`, which is
 normal for the proprietary NVIDIA driver. Identity on this host therefore has to
@@ -226,18 +264,16 @@ Two further observations from that test:
   write, with no retry.
 - **Readback tracks reality, including manual changes.** After the user
   returned the panel to Windows with the monitor's own buttons, five
-  consecutive reads all reported `0x11`. This panel does not report a stale
-  input, which means `status` is trustworthy here and `toggle` has a sound
-  basis. That is a property of this monitor, not a guarantee in general.
+  consecutive reads all reported `0x11`. *Overtaken on 2026-09-23:* the other
+  panel of the same model held a stale value for a week, so no read-back is
+  trusted as confirmation (see the README's safety model).
 
-### Outstanding on this host
+The "destination" names above (`windows`, `ubuntu`) are from the first
+configuration schema, which was organised around computers. Schema 2 knows
+only monitors and inputs; an old file's destinations are upgraded into actions
+and input labels on load.
 
-| Item | Status |
-|---|---|
-| `switch ubuntu` / `switch windows` end to end | not run — only `test-input` has written so far |
-| Return trip issued by the tool | not run — the user recovered by hand |
-
-### The cabling question
+### The cabling question (settled 2026-09-23)
 
 Windows sees panel `...108` on **HDMI-1** and panel `...109` on
 **DisplayPort-1**. The Z4 can only drive DisplayPort. Each AOC has a single DP
@@ -267,7 +303,9 @@ it is not something either computer can settle on its own.
 
 ---
 
-## Outstanding unknowns on both hosts
+## Unknowns as of 2026-09-16
+
+All resolved or made moot by the 2026-09-23 section below.
 
 1. **Physical left/right placement.** Nothing yet maps `ASFPA9A001108` and
    `ASFPA9A001109` to the physical left and right monitors. `configure` asks a

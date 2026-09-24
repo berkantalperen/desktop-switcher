@@ -4,8 +4,11 @@ Three tiers. The first two run unattended; the third must not.
 
 ## Tier 1 — automated, no hardware
 
-`cargo test --workspace`: 174 tests at the time of writing, passing on Windows
-and on Linux (where five Windows-only tests are compiled out).
+`cargo test --workspace`: 219 tests on Windows and 215 on Linux as of
+2026-09-24 (the difference is Windows-only code, compiled out). Run it with
+`cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings` on
+**both** platforms before committing: a lot of the code is `cfg`-gated, so a
+change that is clean on one can fail to build or lint on the other.
 
 They cover, among other things:
 
@@ -32,9 +35,15 @@ They cover, among other things:
 | Mirrored displays and duplicate ids are refused; the built-in panel and detached displays are never addressed | `switcher-backend-windows::topology` |
 | A reshuffle is waited out; a desktop that stays mirrored, or a structural refusal, is still refused | `switcher-backend-windows::topology` |
 | A zero reply is a failed read, not an input; real AOC capabilities yield their advertised inputs | `switcher-backend-windows::topology` |
+| A toggle only ever picks one of its two codes, and a toggle between one code twice is rejected | `switcher-core::switch`, `switcher-core::actions` |
 | A read-back is never recorded as evidence, and switching to a configured input prints nothing needing a person | `switcher-cli` integration tests |
 | The interface never names a computer | `switcher-cli` integration tests |
 | Read-only commands never create or write a configuration | `switcher-cli` integration tests |
+| The tray menu is built from the configuration alone: actions with their hotkeys, then each monitor's named inputs; every item runs the CLI | `switcher-tray::menu` |
+| A failed switch is reduced to one line naming the monitor and the reason; success says nothing | `switcher-tray::notice` |
+| Hotkey strings parse as people write them, and nonsense is explained rather than guessed | `switcher-tray::hotkey` |
+| Linux app-menu and login entries quote their paths per the Desktop Entry spec | `switcher-tray::desktop_entry` |
+| The icon's PNG and ICO encodings decode back to the drawing, with correct checksums | `switcher-icon` |
 
 ## Tier 2 — parser fixtures
 
@@ -70,6 +79,9 @@ on HDMI-1 (`0x11`), the workstation on DisplayPort-1 (`0x0F`).
 | 4b | DDC reachable from the non-displaying computer | The other computer can read and write the monitor | **passed 2026-09-23** — an *awake* panel answered both computers whatever input it showed; the laptop pulled the center panel back from the Z4 on its own |
 | 15 | Switching to a computer whose screens are off | Reported honestly; recovery documented | **passed 2026-09-23** — panels went dark and ignored reads *and* writes from both computers; waking the Z4's screens woke them. See troubleshooting, "The screen went dark". |
 | 18 | Windows re-detection between the steps of an action | The second step waits and succeeds | **passed 2026-09-23** after a fix — the first run refused on a transiently "mirrored" desktop |
+| 19 | Toggle actions from hotkeys | Each press flips one panel; the other is untouched | **passed 2026-09-24** — Ctrl+Alt+1 / Ctrl+Alt+2 from the Windows tray and from GNOME's shortcuts |
+| 20 | Tray menu | Each item switches as its action does; nothing pops up on success | **passed 2026-09-24** — Windows notification area, and the GNOME top bar (GNOME 50.1, Ubuntu's AppIndicator extension) |
+| 21 | Reinstall over a running tray | The old tray is stopped, one new tray runs, hotkeys are held again | **passed 2026-09-24** on both |
 | 8 | Mixed initial inputs | An action converges both monitors on the requested inputs | not run |
 | 10 | Monitor order changes (sleep, dock re-enumeration) | No write lands on the wrong display | not run |
 | 11 | Laptop sleep / wake / dock reconnect | Re-enumeration is safe, or fails clearly | not run |

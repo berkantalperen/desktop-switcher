@@ -7,13 +7,15 @@
 //! and leaves the window layout untouched — and it is also why a window
 //! sitting on that display becomes unreachable until the monitor comes back.
 //!
-//! Three behaviours, chosen by configuration:
+//! Three behaviours:
 //!
 //! * **keep** (default) — do nothing at all. Fast, and windows can strand.
 //! * **keep + sweep** — leave the display attached, but move windows off it
-//!   first. Nothing strands, nothing about the desktop topology changes.
-//! * **drop** — detach the display until it returns. The OS relocates the
-//!   windows itself, at the cost of a reflow each way.
+//!   first: a `sweep` step in an action, or the `sweep` command. Nothing
+//!   strands, nothing about the desktop topology changes.
+//! * **drop** — detach the display until it returns: `release`, behind
+//!   `--experimental`, because on the hardware this was built against it has
+//!   left displays mirrored instead of extended.
 //!
 //! Detaching is the only operation here that can leave someone unable to see
 //! anything, so it refuses to act unless another usable display will remain.

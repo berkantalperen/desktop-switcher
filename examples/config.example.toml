@@ -57,7 +57,9 @@ model = "REPLACE_AFTER_DISCOVERY"
 # The monitor's own VCP 0x60 value, always with an explicit 0x: a bare `11`
 # is rejected, because decimal 11 is 0x0B and the wrong input is expensive.
 input_code = "0x11"
-# Whatever this input means to you.
+# Whatever this input means to you. The tray offers only inputs given a name
+# other than their standard one ("HDMI-1"), since unnamed ones are usually
+# sockets the monitor merely claims to have.
 label = "Laptop"
 # What is known about this input: unknown, reported, read-confirmed,
 # write-confirmed or user-confirmed. `configure` records what the monitor

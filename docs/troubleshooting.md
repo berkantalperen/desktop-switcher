@@ -301,8 +301,9 @@ monitors before.
 ### A code in the capabilities list does nothing
 
 Normal. Capability strings list inputs that do not exist, omit ones that do, and
-sometimes name the wrong socket. The tool labels them `reported` for exactly
-this reason and warns before switching to one.
+sometimes name the wrong socket. `configure` records them as `reported` for
+exactly this reason. Switch to each once and look at the screen; give the ones
+that work a label, and the tray offers only those.
 
 ### The same computer needs a different code on each monitor
 

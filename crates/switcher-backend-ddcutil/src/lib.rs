@@ -1,9 +1,8 @@
 //! Ubuntu backend: a process adapter over the `ddcutil` CLI.
 //!
 //! Validated against **ddcutil 2.2.5** on the HP Z4: discovery, identity,
-//! capabilities and reads all confirmed against the real monitor. No write has
-//! been performed on this hardware, so `set_input` remains the one path here
-//! that has never run for real.
+//! capabilities, reads and writes, each confirmed on the real monitors with
+//! someone watching the screens (docs/test-matrix.md).
 //!
 //! Two decisions worth stating:
 //!

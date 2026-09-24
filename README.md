@@ -266,6 +266,7 @@ crates/
   switcher-tray/              tray / top-bar menu that drives the CLI
   switcher-icon/              the app icon, drawn in code, as .ico and .png
 docs/
+  architecture.md             how it fits together, and why
   hardware-inventory.md       captured evidence from the machines it was built on
   test-matrix.md              what is tested, and the hardware procedure
   troubleshooting.md          failure modes and recovery
@@ -276,6 +277,9 @@ examples/config.example.toml  the configuration schema
 
 Backends sit behind one narrow trait (`MonitorBackend`), so the rules that decide
 whether a write is safe are tested without hardware.
+[docs/architecture.md](docs/architecture.md) explains how the pieces fit, what
+a switch does step by step, and which approaches were tried and reversed;
+[AGENTS.md](AGENTS.md) is the short version for anyone about to change the code.
 
 ---
 

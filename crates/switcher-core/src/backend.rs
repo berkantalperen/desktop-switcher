@@ -1,4 +1,5 @@
-//! The narrow seam between domain logic and the two CLI tools.
+//! The narrow seam between domain logic and the code that talks to monitors:
+//! Windows' own API, or the `ddcutil` CLI on Linux.
 
 use std::fmt;
 use std::time::Duration;
