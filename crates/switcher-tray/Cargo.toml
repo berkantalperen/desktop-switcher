@@ -16,6 +16,12 @@ switcher-icon.workspace = true
 [build-dependencies]
 switcher-icon = { workspace = true, features = ["build"] }
 
+# The status-icon protocol that GNOME (via Ubuntu's AppIndicator extension)
+# and KDE show in the top bar. Pure Rust over D-Bus; no GTK.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

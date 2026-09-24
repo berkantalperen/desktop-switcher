@@ -1,8 +1,13 @@
 //! What the tray menu offers, built from the configuration.
 //!
-//! Pure, so the rules are tested on every platform. The menu is rebuilt from
-//! the configuration each time it opens, so a change made in the GUI shows up
-//! on the next click with nothing to restart.
+//! Pure, so the rules are tested on every platform, and shared by the Windows
+//! and Linux trays: both show exactly the same menu. The model keeps an item's
+//! label and its detail (a hotkey, an input code) apart, because each platform
+//! lays them out and escapes them differently; `windows_text` and `dbus_text`
+//! do that last step.
+//!
+//! The menu is rebuilt from the configuration each time it opens, so a change
+//! made in the GUI shows up on the next click with nothing to restart.
 
 use switcher_core::config::{Config, MonitorConfig, MonitorInput};
 
@@ -23,15 +28,17 @@ pub enum Command {
 pub enum Entry {
     Item {
         id: u32,
-        text: String,
+        label: String,
+        /// Secondary text: an action's hotkey, an input's code.
+        detail: Option<String>,
         command: Command,
     },
     /// Shown greyed out, to say why the menu is short.
     Note {
-        text: String,
+        label: String,
     },
     Submenu {
-        text: String,
+        label: String,
         entries: Vec<Entry>,
     },
     Separator,
@@ -48,19 +55,13 @@ pub fn build(config: Result<&Config, &str>) -> Vec<Entry> {
     let mut entries = Vec::new();
 
     match config {
-        Err(why) => entries.push(Entry::Note {
-            text: menu_text(why),
-        }),
+        Err(why) => entries.push(Entry::Note { label: why.into() }),
         Ok(config) => {
             for action in &config.actions {
-                let mut text = menu_text(&action.name);
-                if let Some(hotkey) = action.hotkey.as_deref() {
-                    text.push('\t');
-                    text.push_str(&pretty_hotkey(hotkey));
-                }
                 entries.push(Entry::Item {
                     id: next_id(),
-                    text,
+                    label: action.name.clone(),
+                    detail: action.hotkey.as_deref().map(pretty_hotkey),
                     command: Command::Cli {
                         args: vec!["run-action".into(), action.name.clone()],
                         describe: action.name.clone(),
@@ -82,7 +83,7 @@ pub fn build(config: Result<&Config, &str>) -> Vec<Entry> {
 
             if entries.is_empty() {
                 entries.push(Entry::Note {
-                    text: "Nothing configured yet".into(),
+                    label: "Nothing configured yet".into(),
                 });
             }
         }
@@ -91,12 +92,14 @@ pub fn build(config: Result<&Config, &str>) -> Vec<Entry> {
     entries.push(Entry::Separator);
     entries.push(Entry::Item {
         id: next_id(),
-        text: "Settings…".into(),
+        label: "Settings…".into(),
+        detail: None,
         command: Command::OpenSettings,
     });
     entries.push(Entry::Item {
         id: next_id(),
-        text: "Quit".into(),
+        label: "Quit".into(),
+        detail: None,
         command: Command::Quit,
     });
     entries
@@ -111,7 +114,8 @@ fn monitor_submenu(monitor: &MonitorConfig, next_id: &mut impl FnMut() -> u32) -
         .into_iter()
         .map(|input| Entry::Item {
             id: next_id(),
-            text: format!("{}\t{}", menu_text(&input.display_name()), input.input_code),
+            label: input.display_name(),
+            detail: Some(input.input_code.to_string()),
             command: Command::Cli {
                 args: vec![
                     "set".into(),
@@ -123,7 +127,7 @@ fn monitor_submenu(monitor: &MonitorConfig, next_id: &mut impl FnMut() -> u32) -
         })
         .collect();
     Some(Entry::Submenu {
-        text: menu_text(&monitor.label),
+        label: monitor.label.clone(),
         entries,
     })
 }
@@ -183,13 +187,33 @@ pub fn pretty_hotkey(hotkey: &str) -> String {
         .join("+")
 }
 
-/// Text safe to hand to a Windows menu: `&` would otherwise underline the
-/// next letter and vanish, and a tab would split the item into columns.
-pub fn menu_text(s: &str) -> String {
-    s.replace('&', "&&").replace('\t', " ")
+/// An item as a Windows menu shows it: the detail right-aligned after a tab,
+/// and `&` doubled, because Windows takes a lone one as an accelerator marker
+/// and hides it. A tab inside the text would start a new column, so it goes.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_text(label: &str, detail: Option<&str>) -> String {
+    let clean = |s: &str| s.replace('&', "&&").replace('\t', " ");
+    match detail {
+        Some(d) => format!("{}\t{}", clean(label), clean(d)),
+        None => clean(label),
+    }
 }
 
-/// The command behind an id, searching submenus too.
+/// An item as a D-Bus menu (GNOME, KDE) shows it: `_` doubled, because there
+/// it marks the accelerator, and the detail in brackets after the label,
+/// since these menus have no column to right-align it in.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn dbus_text(label: &str, detail: Option<&str>) -> String {
+    let clean = |s: &str| s.replace('_', "__");
+    match detail {
+        Some(d) => format!("{}   ({})", clean(label), clean(d)),
+        None => clean(label),
+    }
+}
+
+/// The command behind an id, searching submenus too. Windows needs it; the
+/// Linux menu carries each command in its item instead.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn find(entries: &[Entry], id: u32) -> Option<&Command> {
     entries.iter().find_map(|entry| match entry {
         Entry::Item {
@@ -242,21 +266,27 @@ mod tests {
             monitor("SN-L", "aoc-left", inputs()),
             monitor("SN-C", "aoc-center", inputs()),
         ];
-        let mut laptop = Action::new("Laptop");
-        laptop.hotkey = Some("CTRL+ALT+1".into());
-        let mut workstation = Action::new("Workstation");
-        workstation.hotkey = Some("CTRL+ALT+2".into());
-        c.actions = vec![laptop, workstation];
+        let mut left = Action::new("Toggle left");
+        left.hotkey = Some("CTRL+ALT+1".into());
+        let mut center = Action::new("Toggle center");
+        center.hotkey = Some("CTRL+ALT+2".into());
+        c.actions = vec![left, center, Action::new("Laptop")];
         c
     }
 
-    fn texts(entries: &[Entry]) -> Vec<String> {
+    /// Each entry as `label` or `label | detail`, for comparing whole menus.
+    fn shown(entries: &[Entry]) -> Vec<String> {
         entries
             .iter()
             .map(|e| match e {
-                Entry::Item { text, .. } | Entry::Note { text } | Entry::Submenu { text, .. } => {
-                    text.clone()
-                }
+                Entry::Item {
+                    label,
+                    detail: Some(d),
+                    ..
+                } => format!("{label} | {d}"),
+                Entry::Item { label, .. }
+                | Entry::Note { label }
+                | Entry::Submenu { label, .. } => label.clone(),
                 Entry::Separator => "---".into(),
             })
             .collect()
@@ -266,10 +296,11 @@ mod tests {
     fn actions_come_first_with_their_hotkeys_then_monitors_then_settings() {
         let menu = build(Ok(&desk()));
         assert_eq!(
-            texts(&menu),
+            shown(&menu),
             vec![
-                "Laptop\tCtrl+Alt+1",
-                "Workstation\tCtrl+Alt+2",
+                "Toggle left | Ctrl+Alt+1",
+                "Toggle center | Ctrl+Alt+2",
+                "Laptop",
                 "---",
                 "aoc-left",
                 "aoc-center",
@@ -289,8 +320,8 @@ mod tests {
         assert_eq!(
             command,
             &Command::Cli {
-                args: vec!["run-action".into(), "Workstation".into()],
-                describe: "Workstation".into(),
+                args: vec!["run-action".into(), "Toggle center".into()],
+                describe: "Toggle center".into(),
             }
         );
     }
@@ -300,10 +331,10 @@ mod tests {
     #[test]
     fn a_monitor_offers_only_the_inputs_someone_named() {
         let menu = build(Ok(&desk()));
-        let Entry::Submenu { entries, .. } = &menu[3] else {
-            panic!("not a submenu: {:?}", menu[3]);
+        let Entry::Submenu { entries, .. } = &menu[4] else {
+            panic!("not a submenu: {:?}", menu[4]);
         };
-        assert_eq!(texts(entries), vec!["Laptop\t0x11", "Workstation\t0x0F"]);
+        assert_eq!(shown(entries), vec!["Laptop | 0x11", "Workstation | 0x0F"]);
         let Entry::Item { command, .. } = &entries[1] else {
             panic!()
         };
@@ -343,7 +374,7 @@ mod tests {
         let mut c = desk();
         c.monitors[1].inputs.clear();
         let menu = build(Ok(&c));
-        assert!(!texts(&menu).contains(&"aoc-center".to_string()));
+        assert!(!shown(&menu).contains(&"aoc-center".to_string()));
     }
 
     #[test]
@@ -372,7 +403,7 @@ mod tests {
     fn a_missing_configuration_still_offers_settings_and_quit() {
         let menu = build(Err("No configuration yet"));
         assert_eq!(
-            texts(&menu),
+            shown(&menu),
             vec!["No configuration yet", "---", "Settings…", "Quit"]
         );
     }
@@ -380,7 +411,7 @@ mod tests {
     #[test]
     fn an_empty_configuration_says_so() {
         let c = Config::new("laptop", BackendKind::Fake);
-        assert_eq!(texts(&build(Ok(&c)))[0], "Nothing configured yet");
+        assert_eq!(shown(&build(Ok(&c)))[0], "Nothing configured yet");
     }
 
     #[test]
@@ -390,10 +421,25 @@ mod tests {
         assert_eq!(pretty_hotkey("WIN+d"), "Win+D");
     }
 
-    /// Windows eats a lone `&` as an accelerator marker.
+    /// Windows eats a lone `&` as an accelerator marker, and a tab starts a
+    /// new column.
     #[test]
-    fn names_are_escaped_for_a_windows_menu() {
-        assert_eq!(menu_text("Mail & chat"), "Mail && chat");
-        assert_eq!(menu_text("a\tb"), "a b");
+    fn windows_text_escapes_and_aligns() {
+        assert_eq!(
+            windows_text("Mail & chat", Some("Ctrl+M")),
+            "Mail && chat\tCtrl+M"
+        );
+        assert_eq!(windows_text("a\tb", None), "a b");
+    }
+
+    /// In a D-Bus menu `_` marks the accelerator; a name like `left_panel`
+    /// would otherwise lose its underscore and underline a letter.
+    #[test]
+    fn dbus_text_escapes_and_brackets_the_detail() {
+        assert_eq!(
+            dbus_text("Toggle left", Some("Ctrl+Alt+1")),
+            "Toggle left   (Ctrl+Alt+1)"
+        );
+        assert_eq!(dbus_text("left_panel", None), "left__panel");
     }
 }

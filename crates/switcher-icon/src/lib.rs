@@ -140,9 +140,160 @@ fn ico_image(size: u32) -> Vec<u8> {
     out
 }
 
+/// The icon as a PNG, which is what a Linux desktop wants for app menus.
+///
+/// The image data is stored uncompressed (deflate "stored" blocks), which
+/// every PNG reader accepts, and which keeps this crate free of a compression
+/// dependency. At icon sizes the files stay small anyway.
+pub fn png_file(size: u32) -> Vec<u8> {
+    let rgba = pixels(size);
+    // Each row is prefixed with filter type 0 (none).
+    let row = (size * 4) as usize;
+    let mut raw = Vec::with_capacity((row + 1) * size as usize);
+    for y in 0..size as usize {
+        raw.push(0);
+        raw.extend_from_slice(&rgba[y * row..(y + 1) * row]);
+    }
+
+    let mut out = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
+    let mut header = Vec::new();
+    header.extend_from_slice(&size.to_be_bytes());
+    header.extend_from_slice(&size.to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
+    png_chunk(&mut out, b"IHDR", &header);
+    png_chunk(&mut out, b"IDAT", &zlib_stored(&raw));
+    png_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let start = out.len();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let crc = crc32(&out[start..]);
+    out.extend_from_slice(&crc.to_be_bytes());
+}
+
+/// A zlib stream holding `data` in deflate stored blocks.
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01]; // deflate, 32K window, no preset dictionary
+    let blocks: Vec<&[u8]> = if data.is_empty() {
+        vec![&[]]
+    } else {
+        data.chunks(0xFFFF).collect()
+    };
+    for (i, block) in blocks.iter().enumerate() {
+        out.push(u8::from(i + 1 == blocks.len())); // BFINAL, BTYPE 00
+        let len = block.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The standard check values, so a mistake in either sum cannot hide
+    /// behind a test that only compares the code with itself.
+    #[test]
+    fn checksums_match_their_published_check_values() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+    }
+
+    /// Walk the PNG chunk by chunk, verify every CRC, and decode the stored
+    /// deflate blocks back into rows: exactly the pixels that went in.
+    #[test]
+    fn a_png_decodes_back_to_the_drawing() {
+        let size = 24;
+        let png = png_file(size);
+        assert_eq!(
+            &png[..8],
+            &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']
+        );
+
+        let mut at = 8;
+        let mut kinds = Vec::new();
+        let mut idat = Vec::new();
+        while at < png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            let kind = &png[at + 4..at + 8];
+            let data = &png[at + 8..at + 8 + len];
+            let crc = u32::from_be_bytes(png[at + 8 + len..at + 12 + len].try_into().unwrap());
+            assert_eq!(crc, crc32(&png[at + 4..at + 8 + len]), "CRC of {kind:?}");
+            if kind == b"IHDR" {
+                assert_eq!(u32::from_be_bytes(data[0..4].try_into().unwrap()), size);
+                assert_eq!(u32::from_be_bytes(data[4..8].try_into().unwrap()), size);
+                assert_eq!(&data[8..], &[8, 6, 0, 0, 0]);
+            }
+            if kind == b"IDAT" {
+                idat.extend_from_slice(data);
+            }
+            kinds.push(String::from_utf8_lossy(kind).into_owned());
+            at += 12 + len;
+        }
+        assert_eq!(kinds, ["IHDR", "IDAT", "IEND"]);
+
+        // Inflate the stored blocks by hand.
+        assert_eq!(&idat[..2], &[0x78, 0x01]);
+        let mut raw = Vec::new();
+        let mut i = 2;
+        loop {
+            let last = idat[i] & 1 == 1;
+            let len = u16::from_le_bytes([idat[i + 1], idat[i + 2]]) as usize;
+            let nlen = u16::from_le_bytes([idat[i + 3], idat[i + 4]]);
+            assert_eq!(nlen, !(len as u16));
+            raw.extend_from_slice(&idat[i + 5..i + 5 + len]);
+            i += 5 + len;
+            if last {
+                break;
+            }
+        }
+        let adler = u32::from_be_bytes(idat[i..i + 4].try_into().unwrap());
+        assert_eq!(adler, adler32(&raw));
+
+        let rgba = pixels(size);
+        let row = (size * 4) as usize;
+        for y in 0..size as usize {
+            let line = &raw[y * (row + 1)..(y + 1) * (row + 1)];
+            assert_eq!(line[0], 0, "filter type of row {y}");
+            assert_eq!(&line[1..], &rgba[y * row..(y + 1) * row], "row {y}");
+        }
+    }
+
+    /// Big enough to need more than one stored block.
+    #[test]
+    fn a_large_png_spans_several_blocks() {
+        let png = png_file(256);
+        assert!(png.len() > 256 * 256 * 4);
+        assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
+    }
 
     fn u16_at(b: &[u8], i: usize) -> u16 {
         u16::from_le_bytes([b[i], b[i + 1]])

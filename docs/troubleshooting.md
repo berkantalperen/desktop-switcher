@@ -261,6 +261,30 @@ the wrong screen. Capture the new output into `tests/fixtures/ddcutil/`, run
 `cargo test -p switcher-backend-ddcutil`, and update the parser against the
 failures.
 
+### No icon in the top bar
+
+The icon is a StatusNotifierItem, and stock GNOME has nowhere to show one.
+Check that the *AppIndicator and KStatusNotifierItem Support* extension is
+enabled (`gnome-extensions list --enabled | grep -i appindicator`; Ubuntu ships
+it as `ubuntu-appindicators@ubuntu.com`). The icon waits for it and appears as
+soon as it is on; after 30 seconds without one it shows a notification saying
+so. The hotkeys belong to GNOME and work either way.
+
+To check the icon is running: `gdbus call --session --dest org.freedesktop.DBus
+--object-path /org/freedesktop/DBus --method
+org.freedesktop.DBus.GetConnectionUnixProcessID
+io.github.berkantalperen.DesktopSwitcherTray` prints its process id, or an
+error if it is not running. `install-linux.sh` starts it, and it starts with
+every session after that.
+
+### Some GNOME shortcuts stopped working
+
+An earlier `install-gnome-shortcuts.sh` could leave a malformed entry in
+GNOME's custom-shortcut list, which crashes the service behind every GNOME
+shortcut, not just ours. Running the current script repairs the list; then
+restart the service with
+`systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.target`.
+
 ---
 
 ## Monitors, generally

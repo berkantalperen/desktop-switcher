@@ -39,7 +39,9 @@ pub fn cannot_start(describe: &str, why: &str) -> Notice {
     }
 }
 
-/// The notice when one or more hotkeys could not be registered.
+/// The notice when one or more hotkeys could not be registered. Windows
+/// only: on Linux GNOME owns the hotkeys.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn hotkeys_unavailable(problems: &[String]) -> Notice {
     let title = match problems.len() {
         1 => "A hotkey is not available".to_string(),

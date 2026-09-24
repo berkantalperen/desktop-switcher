@@ -40,18 +40,17 @@ Building needs Rust 1.82 or newer.
 ```
 
 ```bash
-# Linux
-cargo build --release
-install -Dm755 target/release/desktop-switcher ~/.local/bin/
-install -Dm755 target/release/desktop-switcher-gui ~/.local/bin/
-./scripts/install-gnome-shortcuts.sh     # GNOME hotkeys for your actions
+# Linux, after `cargo build --release`. Installs the CLI, the GUI and the
+# top-bar icon into ~/.local/bin, adds an app-menu entry, has the icon start
+# with your session, and binds GNOME shortcuts for your actions' hotkeys.
+./scripts/install-linux.sh
 ```
 
-The Windows script stops a running GUI first and checks every copy landed.
-Windows silently refuses to overwrite a running executable, which leaves an old
-binary reading your configuration with old rules; that is confusing enough to
-be worth a script. Nothing needs elevation, and uninstalling is deleting the
-files.
+Both scripts stop a running copy first and check every copy landed. Windows
+silently refuses to overwrite a running executable, which leaves an old binary
+reading your configuration with old rules; that is confusing enough to be worth
+a script. Nothing needs elevation or sudo, and running a script again updates
+the install.
 
 ---
 
@@ -204,12 +203,12 @@ is the configuration file.
 
 ---
 
-## Tray icon (Windows)
+## Tray icon
 
-`desktop-switcher-tray` puts a small monitor icon in the notification area. One
-click — left or right — opens a menu of your actions, with their hotkeys, and a
-submenu per monitor listing its inputs. Choosing one runs the CLI exactly as a
-hotkey does, without a console window.
+`desktop-switcher-tray` puts a small monitor icon in the Windows notification
+area, or at the right of the GNOME top bar. One click opens a menu of your
+actions, with their hotkeys, and a submenu per monitor listing its inputs.
+Choosing one runs the CLI exactly as a hotkey does, without a console window.
 
 - It re-reads the configuration every time the menu opens, so changes made in
   the GUI appear on the next click.
@@ -219,11 +218,18 @@ hotkey does, without a console window.
   named, every input is listed.
 - It is silent when a switch works. When one does not, it shows a notification
   with the reason, taken from the CLI's report.
-- It registers your actions' hotkeys (below).
-- Only one runs at a time, and opening Desktop Switcher from the Start Menu
-  starts it if you quit it. To keep it visible, drag it out of the `^` overflow
-  onto the taskbar, or turn it on under **Settings → Personalization → Taskbar
-  → Other system tray icons**.
+- Only one runs at a time, and opening Desktop Switcher from the Start Menu or
+  app menu starts it if you quit it.
+
+**Windows:** it registers your actions' hotkeys (below). To keep it visible,
+drag it out of the `^` overflow onto the taskbar, or turn it on under
+**Settings → Personalization → Taskbar → Other system tray icons**.
+
+**Linux:** it is a StatusNotifierItem, the kind of icon KDE, Ubuntu's GNOME
+and most other desktops show. Stock GNOME shows none without the *AppIndicator
+and KStatusNotifierItem Support* extension (Ubuntu ships it on); without it the
+icon has nowhere to appear, and the hotkeys still work. GNOME, not the icon,
+owns the hotkeys.
 
 ---
 
@@ -239,8 +245,9 @@ couple of seconds of saving. If another program already holds a combination,
 the tray says so once and keeps trying, so it picks the key up when the other
 program lets go.
 
-**GNOME:** `./scripts/install-gnome-shortcuts.sh` binds each hotkey as a
-custom shortcut that runs `run-action` (`--uninstall` removes them). Under
+**GNOME:** `./scripts/install-gnome-shortcuts.sh` (which `install-linux.sh`
+runs) binds each hotkey as a custom shortcut that runs `run-action`; run it
+again after changing hotkeys, and `--uninstall` removes them. Under
 Wayland an application cannot reliably grab keys for itself, so GNOME has to do
 it.
 
@@ -256,7 +263,8 @@ crates/
   switcher-desktop/           this computer's desktop: topology, window sweeps
   switcher-cli/               command surface
   switcher-gui/               configuration editor that drives the CLI
-  switcher-tray/              notification-area menu that drives the CLI (Windows)
+  switcher-tray/              tray / top-bar menu that drives the CLI
+  switcher-icon/              the app icon, drawn in code, as .ico and .png
 docs/
   hardware-inventory.md       captured evidence from the machines it was built on
   test-matrix.md              what is tested, and the hardware procedure
@@ -287,6 +295,10 @@ procedure for doing it by hand.
 
 ## Uninstall
 
-Delete the binaries, and the per-user configuration and state directories
-(`desktop-switcher doctor` prints both). Nothing is installed system-wide, no
-service is registered, and no elevation is ever needed.
+On Linux, `./scripts/install-linux.sh --uninstall` removes the binaries, the
+app-menu and autostart entries, the icons and the shortcuts. On Windows, delete
+the binaries, the Start Menu entry and the `Desktop Switcher Tray` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Either way your
+configuration and state are left alone (`desktop-switcher doctor` prints where
+they are). Nothing is installed system-wide, no service is registered, and no
+elevation is ever needed.

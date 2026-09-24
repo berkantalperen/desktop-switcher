@@ -8,11 +8,9 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
 use std::process::Command as Process;
 use std::time::SystemTime;
 
-use switcher_core::config::{self, Config, ConfigError};
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -47,6 +45,7 @@ use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
 use crate::hotkey::{self, Binding};
 use crate::menu::{self, Command, Entry};
 use crate::notice::{self, Notice};
+use crate::shared;
 
 /// The icon reports mouse activity with this message.
 const WM_TRAY: u32 = WM_APP + 1;
@@ -227,14 +226,11 @@ unsafe extern "system" fn window_proc(
 /// after an upgrade when Explorer has not yet let go of the old shortcut
 /// hotkeys. Problems are reported once each, not on every poll.
 fn sync_hotkeys(hwnd: HWND) {
-    let stamp = config::default_config_path()
-        .ok()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok());
+    let stamp = shared::config_stamp();
     if stamp != CONFIG_STAMP.get() {
         CONFIG_STAMP.set(stamp);
         unregister_all(hwnd);
-        let fresh = load_config()
+        let fresh = shared::load_config()
             .map(|c| hotkey::bindings(&c))
             .unwrap_or_default();
         SLOTS.with_borrow_mut(|slots| {
@@ -348,21 +344,8 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The configuration, read fresh on every click so the menu is never stale.
-fn load_config() -> Result<Config, String> {
-    let path = config::default_config_path().map_err(|e| e.to_string())?;
-    match Config::load(&path) {
-        Ok(c) => Ok(c),
-        Err(ConfigError::Missing(_)) => Err("No configuration yet".into()),
-        Err(e) => {
-            let text = format!("Configuration problem: {e}");
-            Err(text.chars().take(80).collect())
-        }
-    }
-}
-
 fn show_menu(hwnd: HWND) {
-    let config = load_config();
+    let config = shared::load_config();
     let entries = match &config {
         Ok(c) => menu::build(Ok(c)),
         Err(why) => menu::build(Err(why)),
@@ -403,15 +386,32 @@ fn show_menu(hwnd: HWND) {
 fn append(menu: HMENU, entries: &[Entry]) {
     for entry in entries {
         match entry {
-            Entry::Item { id, text, .. } => add(menu, MF_STRING, *id as usize, text),
-            Entry::Note { text } => add(menu, MF_STRING | MF_GRAYED, 0, text),
+            Entry::Item {
+                id, label, detail, ..
+            } => add(
+                menu,
+                MF_STRING,
+                *id as usize,
+                &menu::windows_text(label, detail.as_deref()),
+            ),
+            Entry::Note { label } => add(
+                menu,
+                MF_STRING | MF_GRAYED,
+                0,
+                &menu::windows_text(label, None),
+            ),
             Entry::Separator => unsafe {
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             },
-            Entry::Submenu { text, entries } => unsafe {
+            Entry::Submenu { label, entries } => unsafe {
                 if let Ok(sub) = CreatePopupMenu() {
                     append(sub, entries);
-                    add(menu, MF_STRING | MF_POPUP, sub.0 as usize, text);
+                    add(
+                        menu,
+                        MF_STRING | MF_POPUP,
+                        sub.0 as usize,
+                        &menu::windows_text(label, None),
+                    );
                 }
             },
         }
@@ -431,7 +431,7 @@ fn perform(hwnd: HWND, command: Command) {
             let _ = DestroyWindow(hwnd);
         },
         Command::OpenSettings => {
-            let started = sibling("desktop-switcher-gui.exe")
+            let started = shared::sibling("desktop-switcher-gui")
                 .ok_or_else(|| "desktop-switcher-gui.exe was not found".to_string())
                 .and_then(|gui| Process::new(gui).spawn().map_err(|e| e.to_string()));
             if let Err(why) = started {
@@ -439,7 +439,7 @@ fn perform(hwnd: HWND, command: Command) {
             }
         }
         Command::Cli { args, describe } => {
-            let Some(cli) = sibling("desktop-switcher.exe") else {
+            let Some(cli) = shared::sibling("desktop-switcher") else {
                 show_notice(
                     hwnd,
                     &notice::cannot_start(&describe, "desktop-switcher.exe was not found"),
@@ -486,21 +486,6 @@ fn post_notice(window: isize, found: Notice) {
         // Nobody will receive it, so take it back rather than leak it.
         drop(unsafe { Box::from_raw(raw) });
     }
-}
-
-/// A program installed next to this one, or failing that, on PATH.
-fn sibling(name: &str) -> Option<PathBuf> {
-    if let Ok(mut here) = std::env::current_exe() {
-        here.pop();
-        let candidate = here.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
 }
 
 /// An icon from pixels drawn in code: a 32-bit colour bitmap with alpha, and

@@ -26,6 +26,10 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([820.0, 640.0])
             .with_min_inner_size([600.0, 440.0])
             .with_title("Desktop Switcher")
+            // On Linux the window's app id is how GNOME finds its app-menu
+            // entry, and with it the icon for the dash; the tray's
+            // `--install` names that entry the same.
+            .with_app_id("desktop-switcher")
             // The same drawing that is embedded in the executable, so the
             // window's taskbar button matches the tray and the Start Menu.
             .with_icon(std::sync::Arc::new(egui::IconData {
@@ -42,23 +46,33 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Make sure the tray is running: it carries the hotkeys, and this is the one
-/// Start Menu entry, so opening it is how someone gets the tray back after
-/// quitting it. The tray allows only one of itself, so starting it when it is
-/// already running does nothing.
-#[cfg(windows)]
+/// Make sure the tray is running. This is the one entry in the Start Menu or
+/// app menu, so opening it is how someone gets the tray back after quitting
+/// it. The tray allows only one of itself, so starting it when it is already
+/// running does nothing: the new copy sees the old one and exits.
 fn start_tray() {
-    if let Ok(mut here) = std::env::current_exe() {
-        here.pop();
-        let tray = here.join("desktop-switcher-tray.exe");
-        if tray.is_file() {
-            let _ = std::process::Command::new(tray).spawn();
-        }
+    let Ok(mut here) = std::env::current_exe() else {
+        return;
+    };
+    here.pop();
+    let tray = here.join(format!(
+        "desktop-switcher-tray{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    if !tray.is_file() {
+        return;
+    }
+    let mut command = std::process::Command::new(tray);
+    // Its own process group on Unix, so closing a terminal this was started
+    // from does not take the tray with it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    if let Ok(mut child) = command.spawn() {
+        // Reaped when it exits (a duplicate exits at once), so it never
+        // lingers as a zombie.
+        std::thread::spawn(move || child.wait());
     }
 }
-
-#[cfg(not(windows))]
-fn start_tray() {}
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
