@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
-repository = "https://github.com/berkant/desktop-switcher"
+repository = "https://github.com/berkantalperen/desktop-switcher"
 
 [workspace.dependencies]
 switcher-core = { path = "crates/switcher-core" }

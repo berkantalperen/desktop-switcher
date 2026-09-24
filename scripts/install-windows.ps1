@@ -27,15 +27,26 @@
 
     Nothing here needs elevation.
 
+    The programs are taken from next to this script when they are there, as
+    in a release download, and from ..\target\release otherwise.
+
 .EXAMPLE
     .\install-windows.ps1
 #>
 [CmdletBinding()]
 param(
-    [string] $Source = (Join-Path $PSScriptRoot '..\target\release')
+    [string] $Source
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $Source) {
+    $Source = if (Test-Path (Join-Path $PSScriptRoot 'desktop-switcher.exe')) {
+        $PSScriptRoot
+    } else {
+        Join-Path $PSScriptRoot '..\target\release'
+    }
+}
 
 $cli = Join-Path $Source 'desktop-switcher.exe'
 $gui = Join-Path $Source 'desktop-switcher-gui.exe'

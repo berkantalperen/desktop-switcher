@@ -3,7 +3,8 @@
 # settings window and the top-bar icon, an app-menu entry, the icon starting
 # with the session, and GNOME shortcuts for your actions' hotkeys.
 #
-# Run after `cargo build --release`. Needs no sudo: everything goes under
+# Run after `cargo build --release`, or from an unpacked release, where the
+# programs sit next to this script. Needs no sudo: everything goes under
 # ~/.local and ~/.config, and your configuration is never touched.
 #
 # Usage:  scripts/install-linux.sh [--uninstall]
@@ -11,7 +12,12 @@
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-source_dir=${SOURCE:-$here/../target/release}
+if [ -x "$here/desktop-switcher" ]; then
+    default_source=$here
+else
+    default_source=$here/../target/release
+fi
+source_dir=${SOURCE:-$default_source}
 bin=${BIN_DIR:-$HOME/.local/bin}
 programs=(desktop-switcher desktop-switcher-gui desktop-switcher-tray)
 

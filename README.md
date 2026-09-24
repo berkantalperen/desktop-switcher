@@ -32,6 +32,11 @@ Building needs Rust 1.82 or newer.
 
 ## Install
 
+Download the archive for your system from
+[Releases](https://github.com/berkantalperen/desktop-switcher/releases),
+unpack it, and run the install script inside it. Or build from source and run
+the same scripts from the repository:
+
 ```powershell
 # Windows, after `cargo build --release`. Installs the CLI, the GUI and the
 # tray icon, with one Start Menu entry; starts the tray, which carries your
