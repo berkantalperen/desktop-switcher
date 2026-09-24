@@ -35,14 +35,21 @@ current_list() {
 }
 
 # Drop every slot this script owns, leaving anyone else's shortcuts alone.
+#
+# gsettings prints an empty list as `@as []`: `@as` is a type annotation, not
+# an entry. An earlier version kept it as one and wrote back
+# `['@as', ...]`, and gsd-media-keys crashes on any entry that is not a dconf
+# path -- taking every GNOME shortcut down with it, volume keys and
+# Ctrl+Alt+T included. So the annotation is stripped, and only entries shaped
+# like a path (`/.../`) are ever written back.
 remove_ours() {
     local list
     list=$(current_list)
-    printf '%s' "$list" \
+    printf '%s' "${list#@as }" \
         | tr ',' '\n' \
         | sed "s/[][]//g; s/^ *//; s/ *$//; s/^'//; s/'$//" \
-        | grep -v "^$" \
-        | grep -v "$PREFIX" \
+        | { grep -E '^/.*/$' || true; } \
+        | { grep -v "$PREFIX" || true; } \
         | awk 'BEGIN{ORS=""; print "["} {if(NR>1) print ", "; printf "%c%s%c", 39, $0, 39} END{print "]"}'
 }
 
