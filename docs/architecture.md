@@ -82,9 +82,11 @@ safety check can live, and nothing can bypass it.
    once; a lock left by a killed process is reclaimed. The same request inside
    `dedupe_ms` is ignored, so a held key does not fire a burst of writes.
 3. **Discover and bind.** The backend lists what is present; `inventory` binds
-   each configured monitor to exactly one present display by serial,
-   corroborated by connection. No match, two matches, or a moved cable refuses
-   the step. Discovery order is never used to address anything.
+   each configured monitor to exactly one present display by serial. No match
+   or two matches refuses the step. A serial found on a different connection id
+   than the config recorded still binds, and the write goes to the id present
+   now; the CLI then saves the new id and logs `monitor.rebound`. Discovery
+   order is never used to address anything.
 4. **Run the steps in order**, stopping at the first failure:
    - `set-input` writes the code. **Always**, even when the monitor claims to
      be on it already: that claim is least trustworthy exactly when it matters.
@@ -165,6 +167,7 @@ Worth knowing before proposing them again:
 | Detaching displays around a switch (`release`/`claim`) | Left both external displays mirrored on the hardware it was built on. Kept behind `--experimental`; `sweep` solves the stranded-window problem without touching topology. |
 | Per-action Start Menu shortcuts carrying hotkeys | Slow, and Explorer held the keys so nothing else could. The tray registers them. |
 | A destination-computer schema | See "Monitors and inputs, never computers". |
+| Refusing a switch when a panel's connection id differs from the recorded one ("cabling changed") | The id is the OS's name for the output, not a cable: Windows renumbered both panels' ids on the 26H2 update (2026-10-08) and every hotkey was refused. The verified codes name sockets on the *monitor*, which the id says nothing about. Bound by serial now; the id is re-recorded on the next switch. |
 
 ## Making changes
 

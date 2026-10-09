@@ -51,6 +51,9 @@ pub struct PlannedSet {
     /// strings are routinely wrong in both directions, so an unadvertised
     /// code is worth a warning and not a refusal.
     pub advertised: bool,
+    /// The connection id the config held, when this monitor was found by
+    /// serial on a different one. Set so the caller can record the new id.
+    pub rebound_from: Option<String>,
 }
 
 /// Which of two inputs a toggle sets, given what the monitor reports.
@@ -107,6 +110,7 @@ pub fn plan_set_input(
         handle: binding.handle(),
         code,
         advertised: cfg.input(code).is_some(),
+        rebound_from: binding.rebound_from.clone(),
     })
 }
 

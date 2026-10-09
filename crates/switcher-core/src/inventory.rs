@@ -17,6 +17,10 @@ pub struct Binding<'a> {
     pub detected: DetectedMonitor,
     /// Non-blocking observations worth printing.
     pub notes: Vec<String>,
+    /// The connection id the config recorded, when the panel was found by
+    /// serial on a different one. The caller records the new id; the binding
+    /// itself never refuses over it.
+    pub rebound_from: Option<String>,
 }
 
 impl Binding<'_> {
@@ -40,13 +44,6 @@ pub enum BindingProblem {
         monitor: String,
         candidates: Vec<String>,
     },
-    #[error("`{monitor}` (serial {serial}) is now on connection `{found}` but was configured on `{configured}`. Cabling changed, so its verified input codes may point at the wrong physical port. Re-run `desktop-switcher configure` before switching.")]
-    PortChanged {
-        monitor: String,
-        serial: String,
-        configured: String,
-        found: String,
-    },
     #[error("`{monitor}` is reachable over {transport}, which cannot carry VCP 0x60")]
     NotSwitchable { monitor: String, transport: String },
     #[error("`{monitor}` is part of this desktop but is not answering on the channel that carries input switching. A monitor does this while asleep on an input with no picture — nothing plugged in there, or that computer's screen is off — and it ignores every command until a picture arrives. Wake the computer on that input, or use the monitor's own buttons.")]
@@ -58,7 +55,6 @@ impl BindingProblem {
         match self {
             BindingProblem::NotFound { monitor, .. }
             | BindingProblem::Ambiguous { monitor, .. }
-            | BindingProblem::PortChanged { monitor, .. }
             | BindingProblem::NotSwitchable { monitor, .. }
             | BindingProblem::PresentButSilent { monitor } => monitor,
         }
@@ -152,21 +148,20 @@ fn resolve_one<'a>(
         return match matches.len() {
             1 => {
                 let detected = *matches[0];
-                // Same panel, different connection: the cable moved. The
-                // verified codes describe which monitor-side port each computer
-                // occupies, and that assumption no longer holds.
-                if detected.identity.backend_id != cfg.backend_id {
-                    return Err(BindingProblem::PortChanged {
-                        monitor: cfg.key.clone(),
-                        serial: want_serial.to_string(),
-                        configured: cfg.backend_id.clone(),
-                        found: detected.identity.backend_id.clone(),
-                    });
-                }
+                // Same panel, different connection id. That is not evidence a
+                // cable moved: the id is this computer's own name for the
+                // output, and the OS renumbers it whenever it re-enumerates
+                // displays (a feature update, a driver change). The verified
+                // codes name sockets on the *monitor*, which this id says
+                // nothing about. Refusing here broke every hotkey after an
+                // update, so bind by serial and let the caller record the id.
+                let rebound_from = (detected.identity.backend_id != cfg.backend_id)
+                    .then(|| cfg.backend_id.clone());
                 Ok(Binding {
                     monitor: cfg,
                     detected: detected.clone(),
                     notes: Vec::new(),
+                    rebound_from,
                 })
             }
             0 => {
@@ -211,6 +206,7 @@ fn resolve_one<'a>(
                  Swapping cables between identical panels would silently rebind it.",
                 cfg.key
             )],
+            rebound_from: None,
         }),
         0 => Err(BindingProblem::NotFound {
             monitor: cfg.key.clone(),
@@ -347,14 +343,51 @@ mod tests {
         assert_eq!(duplicate_serials(&present), vec!["SAME"]);
     }
 
+    /// Seen on hardware 2026-10-09: a Windows feature update renumbered both
+    /// panels' connection ids (`4&34b9e9a7&0&UID4165` became
+    /// `5&23e00778&0&UID4612`) and every hotkey was refused.
     #[test]
-    fn moving_a_panel_to_another_port_blocks_the_switch() {
-        let config = config_with(vec![cfg_monitor("left", "port-a", Some("SN-L"))]);
-        let present = vec![detected("port-c", Some("SN-L"), Transport::DdcCi)];
+    fn a_renumbered_connection_id_still_binds_by_serial() {
+        let config = config_with(vec![cfg_monitor(
+            "left",
+            r"\\?\DISPLAY#AOC2702#4&34b9e9a7&0&UID4165",
+            Some("SN-L"),
+        )]);
+        let present = vec![detected(
+            r"\\?\DISPLAY#AOC2702#5&23e00778&0&UID4612",
+            Some("SN-L"),
+            Transport::DdcCi,
+        )];
         let set = bind(&config, &present);
-        let problem = &set.problems[0];
-        assert!(matches!(problem, BindingProblem::PortChanged { .. }));
-        assert!(problem.to_string().contains("configure"));
+        assert!(set.is_complete(), "{:?}", set.problems);
+        let binding = set.get("left").unwrap();
+        assert_eq!(
+            binding.detected.identity.backend_id, r"\\?\DISPLAY#AOC2702#5&23e00778&0&UID4612",
+            "the write must go to the id that is present now"
+        );
+        assert_eq!(
+            binding.rebound_from.as_deref(),
+            Some(r"\\?\DISPLAY#AOC2702#4&34b9e9a7&0&UID4165")
+        );
+    }
+
+    #[test]
+    fn an_unchanged_connection_id_is_not_a_rebind() {
+        let config = config_with(vec![cfg_monitor("left", "port-a", Some("SN-L"))]);
+        let present = vec![detected("port-a", Some("SN-L"), Transport::DdcCi)];
+        let set = bind(&config, &present);
+        assert_eq!(set.get("left").unwrap().rebound_from, None);
+    }
+
+    /// Following the serial must never turn into following a *different*
+    /// panel: a new id whose serial is not the configured one is still absent.
+    #[test]
+    fn a_new_connection_id_with_another_serial_is_not_followed() {
+        let config = config_with(vec![cfg_monitor("left", "port-a", Some("SN-L"))]);
+        let present = vec![detected("port-c", Some("SN-R"), Transport::DdcCi)];
+        let set = bind(&config, &present);
+        assert!(set.bound.is_empty());
+        assert!(matches!(set.problems[0], BindingProblem::NotFound { .. }));
     }
 
     #[test]
@@ -406,12 +439,15 @@ mod tests {
         assert!(refined.to_string().contains("not answering"));
     }
 
-    /// Refining anything else would be inventing a diagnosis: an ambiguous or
-    /// miscabled monitor was found, and that is a different problem.
+    /// Refining anything else would be inventing a diagnosis: an ambiguous
+    /// monitor was found, and that is a different problem.
     #[test]
     fn only_a_missing_panel_can_be_restated() {
         let config = config_with(vec![cfg_monitor("left", "port-a", Some("SN-L"))]);
-        let present = vec![detected("port-b", Some("SN-L"), Transport::DdcCi)];
+        let present = vec![
+            detected("port-a", Some("SN-L"), Transport::DdcCi),
+            detected("port-b", Some("SN-L"), Transport::DdcCi),
+        ];
         let set = bind(&config, &present);
         let problem = &set.problems[0];
         assert!(!problem.is_not_found());

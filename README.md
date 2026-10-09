@@ -151,11 +151,14 @@ The rules the code enforces, each with tests behind it:
 - **Switching never asks anything.** It runs from hotkeys, so it neither
   prompts nor prints warnings that would need a person to act on them; what
   can go wrong is refused, waited out, or documented.
-- **Identity before addressing.** Monitors are bound by EDID serial and
-  corroborated by connection. Discovery order is never used to address a write,
-  because it moves when a display sleeps or re-enumerates. On Windows the serial
-  is checked again immediately before every write, so a moved cable cannot
-  redirect one.
+- **Identity before addressing.** Monitors are bound by EDID serial. The
+  connection id is recorded too, but only as this computer's current name for
+  the output: the OS renumbers it on a feature update or driver change, so a
+  different id with the same serial still binds, and the config catches up on
+  the next switch. Discovery order is never used to address a write, because it
+  moves when a display sleeps or re-enumerates. On Windows the serial is checked
+  again immediately before every write, so a replugged cable cannot redirect
+  one.
 - **Refuse rather than guess.** Two displays with one serial, or (on Windows) a
   desktop set to *mirror* rather than extend, cannot be told apart reliably, so the tool
   refuses to write to them and says why.

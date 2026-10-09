@@ -492,3 +492,30 @@ fn read_only_commands_never_create_a_configuration() {
         );
     }
 }
+
+/// Seen on hardware 2026-10-09: a Windows feature update renumbered the
+/// panels' connection ids, the config's recorded ids went stale, and every
+/// hotkey was refused. The serial still names the panel, so the switch goes
+/// ahead and the config catches up.
+#[test]
+fn a_stale_connection_id_does_not_stop_a_switch_and_is_updated() {
+    let sandbox = Sandbox::new("stale-connection-id");
+    sandbox.write_config(&config().replace("\"fake-left\"", "\"fake-left-before-update\""));
+
+    let doctor = sandbox.run(&["doctor"]);
+    let text = combined(&doctor);
+    assert!(doctor.status.success(), "{text}");
+    assert!(text.contains("fake-left-before-update"), "{text}");
+    assert!(!text.contains("BLOCKER"), "{text}");
+
+    // Read-only commands stay read-only, and so does a dry run.
+    sandbox.run(&["set", "FAKE-SN-L", "0x0F", "--dry-run"]);
+    let untouched = std::fs::read_to_string(sandbox.config_path()).unwrap();
+    assert!(untouched.contains("fake-left-before-update"), "{untouched}");
+
+    let out = sandbox.run(&["set", "FAKE-SN-L", "0x0F"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let saved = std::fs::read_to_string(sandbox.config_path()).unwrap();
+    assert!(!saved.contains("fake-left-before-update"), "{saved}");
+    assert!(saved.contains("backend_id = \"fake-left\""), "{saved}");
+}

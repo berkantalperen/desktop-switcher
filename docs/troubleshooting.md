@@ -112,15 +112,23 @@ Two displays report the same serial, so the tool cannot tell which is which and
 will not guess. This usually means a monitor publishes a placeholder serial.
 `desktop-switcher monitors` shows what is duplicated.
 
-### `Cabling changed, so its verified input codes may point at the wrong physical port`
+### A monitor is on a different connection than the config recorded
 
-The monitor was found by its serial, but on a different connection than the one
-recorded. A cable moved, and the recorded codes describe which of the monitor's
-sockets each computer used — which may no longer be true.
+No longer an error. Earlier versions refused with `Cabling changed, so its
+verified input codes may point at the wrong physical port`, which stopped every
+hotkey after a Windows feature update (2026-10-08) renumbered the connection ids
+of both panels.
 
-Fix: run `desktop-switcher configure` to record the new connection, then
-switch to each input once and look, since the codes may have moved with the
-cable. Update the labels in `config.toml` if they did.
+The connection id is the OS's own name for an output; it changes when the OS
+re-enumerates displays, and says nothing about which socket on the *monitor* a
+cable is in. The monitor is found by its serial, the write goes to the id
+present now, and the next switch saves the new id and logs `monitor.rebound`
+in the event log. `doctor` shows the pending change as an `[info]` line.
+
+What this does **not** catch: a cable moved at the monitor end. The recorded
+codes (`0x11`, `0x0F`, ...) name the monitor's sockets, so if you recable a
+monitor, switch to each input once and look, and fix the labels in `config.toml`
+if the codes moved with the cable. `configure` still records everything afresh.
 
 ---
 

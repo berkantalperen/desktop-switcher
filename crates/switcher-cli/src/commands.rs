@@ -89,6 +89,16 @@ pub fn doctor(app: &App) -> Result<i32> {
                             binding.key(),
                             binding.detected.identity.describe()
                         );
+                        if let Some(was) = &binding.rebound_from {
+                            let text = format!(
+                                "now on connection {}, was {was}; the next switch records it",
+                                binding.detected.identity.backend_id
+                            );
+                            for (i, line) in textwrap(&text, 62).into_iter().enumerate() {
+                                let lead = if i == 0 { "[info] " } else { "       " };
+                                println!("       {lead}{line}");
+                            }
+                        }
                     }
                     // A backend may not list a monitor it cannot talk to, so
                     // "unplugged" and "here but unreachable" can arrive
@@ -461,6 +471,7 @@ pub fn set_input(
     if !dry_run {
         LastRequest::record(&app.state_dir, &request);
         learn_from(app, monitor, code, &step);
+        record_rebind(app, &plan);
     }
 
     let report = ApplyReport {
@@ -560,6 +571,38 @@ fn learn_from(app: &App, monitor: &str, code: InputCode, step: &switch::StepRepo
     if let Err(e) = next.save(&app.config_path) {
         ui::warn(format!("could not record what that switch showed: {e}"));
     }
+}
+
+/// Keep the config's connection id for a monitor in step with the one it was
+/// just switched on.
+///
+/// The OS renumbers these when it re-enumerates displays, and the monitor is
+/// found by serial regardless, so this changes nothing about where a write
+/// goes. It only stops the config describing a connection that no longer
+/// exists. Best effort and silent: the log says what happened, and failing to
+/// save just means the next switch notices the same thing again.
+fn record_rebind(app: &App, plan: &switch::PlannedSet) {
+    let Some(was) = plan.rebound_from.as_deref() else {
+        return;
+    };
+    let now = plan.handle.backend_id.clone();
+    let saved = app.config.as_ref().is_some_and(|config| {
+        let mut next = config.clone();
+        let Some(m) = next.monitor_mut(&plan.key) else {
+            return false;
+        };
+        m.backend_id = now.clone();
+        next.save(&app.config_path).is_ok()
+    });
+    app.log.append(
+        "monitor.rebound",
+        &[
+            ("monitor", plan.key.clone()),
+            ("from", was.to_string()),
+            ("to", now),
+            ("saved", saved.to_string()),
+        ],
+    );
 }
 
 fn print_report(report: &ApplyReport) {

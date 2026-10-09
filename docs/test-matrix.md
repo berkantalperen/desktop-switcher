@@ -22,7 +22,9 @@ They cover, among other things:
 | A hung backend process is killed and reported as a timeout | `switcher-core::proc` |
 | Arguments are passed as an array, so a serial containing a `;` cannot become a second command | `switcher-core::proc` |
 | Reordered discovery does not change which monitor a configured entry binds to | `switcher-core::inventory` |
-| Duplicate serials, missing monitors and moved cables all block the switch instead of resolving to a guess | `switcher-core::inventory` |
+| Duplicate serials and missing monitors block the switch instead of resolving to a guess | `switcher-core::inventory` |
+| A renumbered connection id still binds by serial, the write goes to the id present now, and a different serial on a new id is never followed | `switcher-core::inventory` |
+| A stale connection id does not stop a switch; the config is updated by a real switch and left alone by `doctor` and `--dry-run` | `switcher-cli` (`cli.rs`) |
 | The internal laptop panel is never a switch target | `switcher-core::inventory` |
 | Each monitor is written its own code; nothing is batched | `switcher-core::switch` |
 | A read that already matches never suppresses the write, and a stale read cannot block a recovery | `switcher-core::switch` |
